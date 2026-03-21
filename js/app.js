@@ -1018,7 +1018,7 @@ async function renderDictationScreen(childId) {
   // Transcript updates
   window.addEventListener('dictationUpdate', (e) => {
     if (e.detail.interim) {
-      interimText.textContent = '...'. + e.detail.interim;
+      interimText.textContent = '...' + e.detail.interim;
     }
   });
 
