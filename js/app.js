@@ -1242,12 +1242,16 @@ async function renderDictationScreen(childId) {
     }
 
     hideLoading();
-    if (errorCount > 0) {
-      showToast(`Saved ${savedCount}, ${errorCount} failed: ${lastError}`, 'error');
+    if (savedCount === 0 && errorCount > 0) {
+      // All failed - stay on page so user can see error and retry
+      showToast(`Failed to save: ${lastError}`, 'error');
+    } else if (errorCount > 0) {
+      showToast(`Saved ${savedCount}, ${errorCount} failed`, 'error');
+      setTimeout(() => viewChildGuide(childId), 2000);
     } else {
       showToast(`Saved ${savedCount} items to guide!`, 'success');
+      setTimeout(() => viewChildGuide(childId), 1500);
     }
-    setTimeout(() => viewChildGuide(childId), 1200);
   });
 
   // Retake
