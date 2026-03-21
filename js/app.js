@@ -25,6 +25,8 @@ import {
   startDictation, stopDictation, abortDictation
 } from './dictation.js';
 
+import { processTranscript } from './textProcessor.js';
+
 import { isFirebaseConfigured } from './config.js';
 
 // ============================================================================
@@ -73,11 +75,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (user && userData) {
       // Load family data if user has one
       if (userData.familyId) {
-        const familyResult = await getFamily(userData.familyId);
-        if (familyResult.success) {
-          state.currentFamily = familyResult.data;
+        try {
+          const familyResult = await getFamily(userData.familyId);
+          if (familyResult.success) {
+            state.currentFamily = familyResult.data;
+          } else {
+            console.warn('Failed to load family:', familyResult.error);
+            state.currentFamily = null;
+          }
+        } catch (err) {
+          console.error('Error loading family:', err);
+          state.currentFamily = null;
         }
+      } else {
+        state.currentFamily = null;
       }
+    } else {
+      state.currentFamily = null;
     }
 
     // Route to appropriate screen
@@ -98,10 +112,34 @@ async function routeApp() {
     state.currentScreen = 'auth-login';
     renderAuthLogin();
   } else if (!state.userData) {
-    // User logged in but no profile (shouldn't happen)
-    await signOut();
-    state.currentScreen = 'auth-login';
-    renderAuthLogin();
+    // User logged in but no profile yet -- wait briefly for it to be created
+    // This handles the race condition during signup where auth fires before Firestore write completes
+    state.currentScreen = 'auth-loading';
+    renderLoading('Setting up your account...');
+    // Retry loading user data after a short delay
+    setTimeout(async () => {
+      try {
+        const firestore = getFirestore();
+        const docSnap = await firestore.collection('users').doc(state.currentUser.uid).get();
+        if (docSnap.exists) {
+          state.userData = docSnap.data();
+          await routeApp();
+        } else {
+          // Still no profile after retry -- sign out
+          await signOut();
+          state.currentScreen = 'auth-login';
+          renderAuthLogin();
+          showToast('Account setup failed. Please try again.', 'error');
+        }
+      } catch (error) {
+        console.error('Error loading user profile on retry:', error);
+        await signOut();
+        state.currentScreen = 'auth-login';
+        renderAuthLogin();
+        showToast('Error loading account. Please try again.', 'error');
+      }
+    }, 1500);
+    return;
   } else if (!state.userData.role) {
     // User logged in but no role set
     state.currentScreen = 'auth-role-select';
@@ -218,6 +256,12 @@ function renderAuthSignup() {
           <button type="submit" class="btn btn-primary">Create Account</button>
         </form>
 
+        <div class="auth-divider">OR</div>
+
+        <button id="google-signup-btn" class="btn btn-outline btn-full">
+          <span>Sign up with Google</span>
+        </button>
+
         <div class="auth-footer">
           <p>Already have an account? <a href="#" id="go-to-login">Sign in</a></p>
         </div>
@@ -226,6 +270,7 @@ function renderAuthSignup() {
   `;
 
   document.getElementById('signup-form').addEventListener('submit', handleSignup);
+  document.getElementById('google-signup-btn').addEventListener('click', handleGoogleLogin);
   document.getElementById('go-to-login').addEventListener('click', (e) => {
     e.preventDefault();
     renderAuthLogin();
@@ -324,6 +369,19 @@ async function handlePasswordReset(e) {
   hideLoading();
 }
 
+async function handleChangeRole() {
+  showLoading();
+  const result = await setUserRole(null);
+  if (result.success) {
+    state.userData.role = null;
+    hideLoading();
+    renderRoleSelect();
+  } else {
+    showToast(result.error || 'Failed to change role', 'error');
+    hideLoading();
+  }
+}
+
 // ============================================================================
 // ROLE SELECTION
 // ============================================================================
@@ -359,6 +417,10 @@ function renderRoleSelect() {
     if (!result.success) {
       showToast(result.error, 'error');
       hideLoading();
+    } else {
+      state.userData.role = 'parent';
+      hideLoading();
+      await routeApp();
     }
   });
 
@@ -368,6 +430,10 @@ function renderRoleSelect() {
     if (!result.success) {
       showToast(result.error, 'error');
       hideLoading();
+    } else {
+      state.userData.role = 'babysitter';
+      hideLoading();
+      await routeApp();
     }
   });
 }
@@ -391,6 +457,10 @@ function renderParentOnboarding() {
           </div>
           <button type="submit" class="btn btn-primary btn-full">Create Family</button>
         </form>
+
+        <div class="divider"></div>
+
+        <button id="change-role-btn" class="btn btn-outline btn-full">Change Role</button>
       </div>
     </div>
   `;
@@ -411,9 +481,12 @@ function renderParentOnboarding() {
         inviteCode: result.inviteCode
       };
       showToast('Family created!', 'success');
-      // Route will be triggered by auth state change
+      hideLoading();
+      await routeApp();
     }
   });
+
+  document.getElementById('change-role-btn').addEventListener('click', handleChangeRole);
 }
 
 // ============================================================================
@@ -440,7 +513,8 @@ function renderSitterOnboarding() {
 
         <div class="divider"></div>
 
-        <button id="logout-btn" class="btn btn-outline btn-full">Sign Out</button>
+        <button id="change-role-btn" class="btn btn-outline btn-full">Change Role</button>
+        <button id="logout-btn" class="btn btn-outline btn-full" style="margin-top: 0.5rem;">Sign Out</button>
       </div>
     </div>
   `;
@@ -457,8 +531,12 @@ function renderSitterOnboarding() {
     } else {
       showToast('Joined family!', 'success');
       state.currentFamily = { id: result.familyId };
+      hideLoading();
+      await routeApp();
     }
   });
+
+  document.getElementById('change-role-btn').addEventListener('click', handleChangeRole);
 
   document.getElementById('logout-btn').addEventListener('click', async () => {
     await signOut();
@@ -496,10 +574,6 @@ async function renderParentDashboard() {
           </div>
 
           <div class="quick-actions">
-            <button class="action-btn action-btn-primary" id="dictate-btn">
-              <span class="icon">🎤</span>
-              <span>Dictate Guide</span>
-            </button>
             <button class="action-btn" id="messages-btn">
               <span class="icon">💬</span>
               <span>Messages</span>
@@ -564,14 +638,6 @@ async function renderParentDashboard() {
   `;
 
   // Event listeners
-  document.getElementById('dictate-btn')?.addEventListener('click', async () => {
-    if (children.length === 0) {
-      showToast('Please add a child first', 'info');
-      return;
-    }
-    await renderDictationScreen(children[0].id);
-  });
-
   document.getElementById('messages-btn')?.addEventListener('click', () => {
     renderMessagesScreen();
   });
@@ -757,6 +823,26 @@ async function viewChildGuide(childId) {
 
       <main class="app-content">
         <div class="container">
+          ${isParent ? `
+          <div class="guide-action-buttons">
+            <button id="dictate-guide-btn" class="dictate-banner-btn">
+              <span class="dictate-banner-icon">🎤</span>
+              <span class="dictate-banner-text">
+                <strong>Dictate Care Guide</strong>
+                <small>Speak and auto-organize into sections</small>
+              </span>
+            </button>
+            <button id="upload-doc-btn" class="dictate-banner-btn upload-banner-btn">
+              <span class="dictate-banner-icon">📄</span>
+              <span class="dictate-banner-text">
+                <strong>Upload Instructions</strong>
+                <small>Import from PDF or Word doc</small>
+              </span>
+            </button>
+          </div>
+          <input type="file" id="doc-file-input" accept=".pdf,.docx,.doc,.txt" style="display: none;">
+          ` : ''}
+
           <div class="tabs">
             ${getGuideSections().map(section => `
               <button class="tab-btn" data-section="${section}">
@@ -817,7 +903,7 @@ async function viewChildGuide(childId) {
       document.querySelectorAll('.section-content').forEach(s => s.style.display = 'none');
 
       btn.classList.add('active');
-      document.querySelector(`[data-section="${btn.dataset.section}"]`).style.display = 'block';
+      document.querySelector(`.section-content[data-section="${btn.dataset.section}"]`).style.display = 'block';
     });
   });
 
@@ -830,6 +916,21 @@ async function viewChildGuide(childId) {
     } else {
       renderSitterDashboard();
     }
+  });
+
+  document.getElementById('dictate-guide-btn')?.addEventListener('click', () => {
+    renderDictationScreen(childId);
+  });
+
+  // Upload document handler
+  document.getElementById('upload-doc-btn')?.addEventListener('click', () => {
+    document.getElementById('doc-file-input')?.click();
+  });
+
+  document.getElementById('doc-file-input')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await handleDocumentUpload(file, childId, child);
   });
 
   document.getElementById('more-btn')?.addEventListener('click', () => {
@@ -909,6 +1010,7 @@ async function renderDictationScreen(childId) {
     return;
   }
 
+  state.currentChild = childId;
   const child = await getChild(state.currentFamily.id, childId);
   if (!child.success) {
     showToast('Error loading child', 'error');
@@ -920,35 +1022,45 @@ async function renderDictationScreen(childId) {
     <div class="app-layout">
       <header class="app-header">
         <button class="btn-icon" id="back-btn">←</button>
-        <h1 class="header-title">Dictate Guide</h1>
+        <h1 class="header-title">Dictate for ${child.data.name}</h1>
       </header>
 
       <main class="app-content dictation-screen">
         <div class="container">
           <div class="dictation-card">
-            <div id="recording-status" class="recording-status hidden">
-              <div class="pulse-dot"></div>
-              <span>Listening...</span>
+            <p style="text-align: center; color: #666; margin-bottom: 1rem;">
+              Talk about ${child.data.name}'s care and I'll organize it into the right sections automatically.
+            </p>
+
+            <div id="mic-area" style="text-align: center; margin: 1.5rem 0;">
+              <button id="start-btn" class="mic-button">
+                <span class="mic-icon">🎤</span>
+                <span>Start Dictation</span>
+              </button>
+
+              <div id="recording-area" style="display: none;">
+                <div class="recording-status">
+                  <div class="pulse-dot"></div>
+                  <span>Listening...</span>
+                </div>
+                <button id="stop-btn" class="btn btn-primary" style="margin-top: 1rem; background: #e74c3c; min-width: 180px; padding: 12px 24px; font-size: 1.1em;">
+                  Stop Dictation
+                </button>
+              </div>
             </div>
 
-            <button id="mic-btn" class="mic-button">
-              <span class="mic-icon">🎤</span>
-              <span>Start Recording</span>
-            </button>
-
-            <div id="transcript-display" class="transcript-display">
-              <p id="final-text" class="final-text"></p>
-              <p id="interim-text" class="interim-text"></p>
+            <div id="transcript-display" class="transcript-display" style="min-height: 60px;">
+              <p id="final-text" class="final-text" style="white-space: pre-wrap;"></p>
+              <p id="interim-text" class="interim-text" style="color: #999; font-style: italic;"></p>
             </div>
 
-            <div id="categories" class="categories hidden">
-              <h4>Suggested Categories:</h4>
-              <div id="category-list"></div>
-            </div>
-
-            <div id="actions" class="actions hidden">
-              <button class="btn btn-primary" id="save-btn">Save to Guide</button>
-              <button class="btn btn-outline" id="retake-btn">Retake</button>
+            <div id="organized-results" style="display: none; margin-top: 1.5rem;">
+              <h4 style="margin-bottom: 0.75rem;">Organized into sections:</h4>
+              <div id="results-list"></div>
+              <div style="display: flex; gap: 8px; margin-top: 1.5rem;">
+                <button class="btn btn-primary" id="save-all-btn" style="flex: 1;">Save All to Guide</button>
+                <button class="btn btn-outline" id="retake-btn">Redo</button>
+              </div>
             </div>
           </div>
         </div>
@@ -958,111 +1070,425 @@ async function renderDictationScreen(childId) {
 
   let isRecording = false;
   let finalTranscript = '';
-  let selectedCategory = null;
+  let organizedItems = {};
 
-  const micBtn = document.getElementById('mic-btn');
-  const recordingStatus = document.getElementById('recording-status');
+  const startBtn = document.getElementById('start-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  const recordingArea = document.getElementById('recording-area');
   const finalText = document.getElementById('final-text');
   const interimText = document.getElementById('interim-text');
-  const categoriesDiv = document.getElementById('categories');
-  const categoryList = document.getElementById('category-list');
-  const actionsDiv = document.getElementById('actions');
+  const organizedResults = document.getElementById('organized-results');
+  const resultsList = document.getElementById('results-list');
 
-  // Mic button listener
-  micBtn.addEventListener('click', async () => {
-    if (!isRecording) {
-      isRecording = true;
-      micBtn.classList.add('recording');
-      recordingStatus.classList.remove('hidden');
-      finalText.textContent = '';
-      interimText.textContent = '';
+  // Start dictation
+  startBtn.addEventListener('click', async () => {
+    if (isRecording) return;
+    isRecording = true;
+    startBtn.style.display = 'none';
+    recordingArea.style.display = 'block';
+    finalText.textContent = '';
+    interimText.textContent = '';
+    organizedResults.style.display = 'none';
 
-      try {
-        const result = await startDictation();
-        if (result.success) {
-          finalTranscript = result.transcript;
-          isRecording = false;
-          micBtn.classList.remove('recording');
-          recordingStatus.classList.add('hidden');
-
-          if (finalTranscript.length > 0) {
-            finalText.textContent = finalTranscript;
-
-            // Show categories
-            const cats = categorizeText(finalTranscript);
-            if (cats.length > 0) {
-              categoryList.innerHTML = cats.map((cat, idx) => `
-                <div class="category-option" onclick="selectCategory('${cat.category}', this)">
-                  <input type="radio" name="category" value="${cat.category}"
-                    ${idx === 0 ? 'checked' : ''}>
-                  <label>${getSectionLabel(cat.category)}</label>
-                  <span class="confidence">${Math.round(cat.confidence * 100)}%</span>
-                </div>
-              `).join('');
-              selectedCategory = cats[0].category;
-
-              categoriesDiv.classList.remove('hidden');
-              actionsDiv.classList.remove('hidden');
-            }
-          }
-        }
-      } catch (error) {
+    try {
+      const result = await startDictation();
+      if (result.success) {
+        // Use the returned transcript, or fall back to whatever text was displayed on screen
+        finalTranscript = result.transcript || finalText.textContent || window._lastDictationText || '';
         isRecording = false;
-        micBtn.classList.remove('recording');
-        recordingStatus.classList.add('hidden');
-        showToast(error.message, 'error');
+        recordingArea.style.display = 'none';
+        startBtn.style.display = 'inline-flex';
+        interimText.textContent = '';
+
+        console.log('[CribNotes] Dictation result transcript length:', result.transcript?.length, 'Final used:', finalTranscript.length);
+
+        if (finalTranscript.trim().length > 0) {
+          finalText.textContent = finalTranscript;
+          showOrganizedResults(finalTranscript);
+        } else {
+          showToast('No speech detected. Try again.', 'info');
+        }
       }
+    } catch (error) {
+      isRecording = false;
+      recordingArea.style.display = 'none';
+      startBtn.style.display = 'inline-flex';
+      showToast(error.message, 'error');
     }
   });
 
-  // Transcript updates
-  window.addEventListener('dictationUpdate', (e) => {
+  // Stop dictation
+  stopBtn.addEventListener('click', () => {
+    stopDictation();
+  });
+
+  // Live transcript updates
+  const dictationHandler = (e) => {
+    if (e.detail.final) {
+      finalText.textContent = e.detail.final;
+    }
     if (e.detail.interim) {
-      interimText.textContent = '...'. + e.detail.interim;
+      interimText.textContent = e.detail.interim;
+    } else {
+      interimText.textContent = '';
     }
-  });
-
-  // Category selection
-  window.selectCategory = function(category, element) {
-    selectedCategory = category;
-    document.querySelectorAll('.category-option input').forEach(r => r.checked = false);
-    element.querySelector('input').checked = true;
   };
+  window.addEventListener('dictationUpdate', dictationHandler);
 
-  // Save
-  document.getElementById('save-btn')?.addEventListener('click', async () => {
-    if (!finalTranscript || !selectedCategory) {
+  // Organize transcript into guide sections
+  async function showOrganizedResults(transcript) {
+    // Show processing indicator
+    resultsList.innerHTML = `
+      <div style="text-align: center; padding: 20px; color: #666;">
+        <div style="font-size: 1.5em; margin-bottom: 8px;">Organizing your notes...</div>
+        <div style="font-size: 0.9em;">Cleaning up and categorizing</div>
+      </div>
+    `;
+    organizedResults.style.display = 'block';
+
+    try {
+      // Process transcript through AI or smart cleanup
+      const result = await processTranscript(transcript, child.data.name);
+      console.log('[CribNotes] Processed result:', JSON.stringify(result));
+
+      organizedItems = result.sections || {};
+
+      if (Object.keys(organizedItems).length === 0) {
+        resultsList.innerHTML = `<p style="color: #666; text-align: center;">Could not organize the text. Try dictating again with more detail.</p>`;
+        return;
+      }
+
+      // Render polished results
+      resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
+        <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+          <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
+          <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
+            ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #e76f51; line-height: 1.4;">${item}</li>`).join('')}
+          </ul>
+        </div>
+      `).join('');
+    } catch (error) {
+      console.error('[CribNotes] Processing error:', error);
+      resultsList.innerHTML = `<p style="color: #e74c3c;">Error processing text: ${error.message}</p>`;
+    }
+  }
+
+  // Save all organized items to guide
+  document.getElementById('save-all-btn')?.addEventListener('click', async () => {
+    if (Object.keys(organizedItems).length === 0) {
       showToast('Nothing to save', 'error');
       return;
     }
 
     showLoading();
+    let savedCount = 0;
+    let errorCount = 0;
+    let lastError = '';
 
-    const result = await addGuideItem(
-      state.currentFamily.id,
-      childId,
-      selectedCategory,
-      finalTranscript
-    );
+    console.log('[CribNotes] Saving to family:', state.currentFamily.id, 'child:', childId);
+    console.log('[CribNotes] Items to save:', JSON.stringify(organizedItems));
 
-    if (!result.success) {
-      showToast(result.error, 'error');
-      hideLoading();
+    // Ensure the care guide doc exists before trying arrayUnion
+    const guideCheck = await getCareGuide(state.currentFamily.id, childId);
+    console.log('[CribNotes] Guide doc check:', guideCheck.success);
+
+    for (const [section, items] of Object.entries(organizedItems)) {
+      for (const item of items) {
+        try {
+          console.log('[CribNotes] Saving item to section:', section, 'item:', item);
+          const result = await addGuideItem(state.currentFamily.id, childId, section, item);
+          console.log('[CribNotes] Save result:', JSON.stringify(result));
+          if (result.success) {
+            savedCount++;
+          } else {
+            errorCount++;
+            lastError = result.error || 'Unknown error';
+            console.error('[CribNotes] Save failed:', result.error);
+          }
+        } catch (err) {
+          errorCount++;
+          lastError = err.message;
+          console.error('[CribNotes] Save exception:', err);
+        }
+      }
+    }
+
+    hideLoading();
+    if (savedCount === 0 && errorCount > 0) {
+      // All failed - stay on page so user can see error and retry
+      showToast(`Failed to save: ${lastError}`, 'error');
+    } else if (errorCount > 0) {
+      showToast(`Saved ${savedCount}, ${errorCount} failed`, 'error');
+      setTimeout(() => viewChildGuide(childId), 2000);
     } else {
-      showToast('Saved to ' + getSectionLabel(selectedCategory), 'success');
+      showToast(`Saved ${savedCount} items to guide!`, 'success');
       setTimeout(() => viewChildGuide(childId), 1500);
     }
   });
 
   // Retake
   document.getElementById('retake-btn')?.addEventListener('click', () => {
-    renderDictationScreen(childId);
+    finalTranscript = '';
+    organizedItems = {};
+    finalText.textContent = '';
+    interimText.textContent = '';
+    organizedResults.style.display = 'none';
+    startBtn.style.display = 'inline-flex';
   });
 
-  // Back
+  // Back - clean up listener
   document.getElementById('back-btn')?.addEventListener('click', () => {
     stopDictation();
-    renderParentDashboard();
+    window.removeEventListener('dictationUpdate', dictationHandler);
+    viewChildGuide(childId);
+  });
+}
+
+// ============================================================================
+// DOCUMENT UPLOAD & PARSING
+// ============================================================================
+
+async function handleDocumentUpload(file, childId, child) {
+  const fileName = file.name.toLowerCase();
+  const maxSize = 10 * 1024 * 1024; // 10MB
+
+  if (file.size > maxSize) {
+    showToast('File too large. Max 10MB.', 'error');
+    return;
+  }
+
+  showLoading();
+
+  try {
+    let extractedText = '';
+
+    if (fileName.endsWith('.pdf')) {
+      extractedText = await extractTextFromPDF(file);
+    } else if (fileName.endsWith('.docx') || fileName.endsWith('.doc')) {
+      extractedText = await extractTextFromDocx(file);
+    } else if (fileName.endsWith('.txt')) {
+      extractedText = await file.text();
+    } else {
+      hideLoading();
+      showToast('Unsupported file type. Use PDF, Word, or text files.', 'error');
+      return;
+    }
+
+    if (!extractedText || extractedText.trim().length < 10) {
+      hideLoading();
+      showToast('Could not extract text from the file. It may be image-based or empty.', 'error');
+      return;
+    }
+
+    console.log('[CribNotes] Extracted text from upload:', extractedText.length, 'chars');
+    hideLoading();
+
+    // Show the extracted text and let user review before organizing
+    renderUploadReview(extractedText, childId, child);
+
+  } catch (error) {
+    hideLoading();
+    console.error('[CribNotes] Document upload error:', error);
+    showToast('Error reading file: ' + error.message, 'error');
+  }
+}
+
+async function extractTextFromPDF(file) {
+  if (!window.pdfjsLib) {
+    throw new Error('PDF reader not loaded. Please refresh and try again.');
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+
+    // Use y-coordinates to detect line and paragraph breaks.
+    // PDF.js items have transform[5] = y position (higher = higher on page).
+    let lastY = null;
+    let lastHeight = 12;
+    let pageText = '';
+
+    for (const item of content.items) {
+      const y = item.transform ? item.transform[5] : null;
+      const height = item.height || lastHeight;
+
+      if (lastY !== null && y !== null) {
+        const yDiff = Math.abs(lastY - y);
+
+        if (yDiff > height * 1.8) {
+          // Large gap = paragraph break
+          pageText += '\n\n';
+        } else if (yDiff > height * 0.5) {
+          // Normal line break
+          pageText += '\n';
+        } else if (item.str && !item.str.startsWith(' ') && pageText && !pageText.endsWith(' ') && !pageText.endsWith('\n')) {
+          // Same line, add space between words
+          pageText += ' ';
+        }
+      }
+
+      pageText += item.str;
+      if (y !== null) lastY = y;
+      if (height > 0) lastHeight = height;
+    }
+
+    fullText += pageText + '\n\n';
+  }
+
+  return fullText.trim();
+}
+
+async function extractTextFromDocx(file) {
+  if (!window.mammoth) {
+    throw new Error('Word doc reader not loaded. Please refresh and try again.');
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return result.value.trim();
+}
+
+function renderUploadReview(extractedText, childId, child) {
+  const root = document.getElementById('app-root');
+  const childName = child.data?.name || child.name || '';
+
+  // Truncate preview if very long
+  const previewText = extractedText.length > 1500
+    ? extractedText.substring(0, 1500) + '...'
+    : extractedText;
+
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">&#8592;</button>
+        <h1 class="header-title">Review Upload</h1>
+      </header>
+
+      <main class="app-content">
+        <div class="container">
+          <div class="dictation-card">
+            <p style="text-align: center; color: #666; margin-bottom: 1rem;">
+              Extracted text from your document. Review and then organize into ${childName}'s care guide.
+            </p>
+
+            <div id="extracted-text-display" class="transcript-display" style="max-height: 300px; overflow-y: auto; font-size: 0.9em; line-height: 1.5;">
+              <p style="white-space: pre-wrap;">${previewText.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+            </div>
+
+            <div style="text-align: center; color: #999; margin: 8px 0; font-size: 0.85em;">
+              ${extractedText.length} characters extracted
+            </div>
+
+            <div style="display: flex; gap: 8px; margin-top: 1rem;">
+              <button class="btn btn-primary" id="organize-upload-btn" style="flex: 1;">Organize into Guide</button>
+              <button class="btn btn-outline" id="cancel-upload-btn">Cancel</button>
+            </div>
+
+            <div id="upload-organized-results" style="display: none; margin-top: 1.5rem;">
+              <h4 style="margin-bottom: 0.75rem;">Organized into sections:</h4>
+              <div id="upload-results-list"></div>
+              <div style="display: flex; gap: 8px; margin-top: 1.5rem;">
+                <button class="btn btn-primary" id="save-upload-btn" style="flex: 1;">Save All to Guide</button>
+                <button class="btn btn-outline" id="reorg-upload-btn">Re-organize</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  `;
+
+  let organizedItems = {};
+
+  document.getElementById('back-btn')?.addEventListener('click', () => {
+    viewChildGuide(childId);
+  });
+
+  document.getElementById('cancel-upload-btn')?.addEventListener('click', () => {
+    viewChildGuide(childId);
+  });
+
+  // Organize the extracted text
+  const handleOrganize = async () => {
+    const resultsList = document.getElementById('upload-results-list');
+    const organizedResults = document.getElementById('upload-organized-results');
+
+    resultsList.innerHTML = `
+      <div style="text-align: center; padding: 20px; color: #666;">
+        <div style="font-size: 1.5em; margin-bottom: 8px;">Organizing your document...</div>
+        <div style="font-size: 0.9em;">Cleaning up and categorizing</div>
+      </div>
+    `;
+    organizedResults.style.display = 'block';
+
+    try {
+      const result = await processTranscript(extractedText, childName, 'document');
+      console.log('[CribNotes] Upload processed result:', JSON.stringify(result));
+
+      organizedItems = result.sections || {};
+
+      if (Object.keys(organizedItems).length === 0) {
+        resultsList.innerHTML = '<p style="color: #666; text-align: center;">Could not organize the text. The document may not contain care guide information.</p>';
+        return;
+      }
+
+      resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
+        <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+          <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
+          <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
+            ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #2a9d8f; line-height: 1.4;">${item}</li>`).join('')}
+          </ul>
+        </div>
+      `).join('');
+    } catch (error) {
+      console.error('[CribNotes] Upload processing error:', error);
+      resultsList.innerHTML = `<p style="color: #e74c3c;">Error processing document: ${error.message}</p>`;
+    }
+  };
+
+  document.getElementById('organize-upload-btn')?.addEventListener('click', handleOrganize);
+  document.getElementById('reorg-upload-btn')?.addEventListener('click', handleOrganize);
+
+  // Save all organized items
+  document.getElementById('save-upload-btn')?.addEventListener('click', async () => {
+    if (Object.keys(organizedItems).length === 0) {
+      showToast('Nothing to save', 'error');
+      return;
+    }
+
+    showLoading();
+    let savedCount = 0;
+    let errorCount = 0;
+
+    const guideCheck = await getCareGuide(state.currentFamily.id, childId);
+    console.log('[CribNotes] Guide doc check for upload save:', guideCheck.success);
+
+    for (const [section, items] of Object.entries(organizedItems)) {
+      for (const item of items) {
+        try {
+          const result = await addGuideItem(state.currentFamily.id, childId, section, item);
+          if (result.success) {
+            savedCount++;
+          } else {
+            errorCount++;
+          }
+        } catch (err) {
+          errorCount++;
+        }
+      }
+    }
+
+    hideLoading();
+    if (savedCount > 0) {
+      showToast(`Saved ${savedCount} items from document!`, 'success');
+      setTimeout(() => viewChildGuide(childId), 1500);
+    } else {
+      showToast('Failed to save items', 'error');
+    }
   });
 }
 
@@ -1120,7 +1546,7 @@ async function renderChildChecklists(childId) {
                       ${checklist.items.map((item, idx) => `
                         <li>
                           <input type="checkbox" ${item.done ? 'checked' : ''}
-                            onchange="updateChecklistItem('${childId}', '${checklist.id}', ${idx}, this.checked)">
+                            onchange="handleUpdateChecklistItem('${childId}', '${checklist.id}', ${idx}, this.checked)">
                           <label>${item.text}</label>
                         </li>
                       `).join('')}
@@ -1146,7 +1572,7 @@ async function renderChildChecklists(childId) {
   }
 }
 
-async function updateChecklistItem(childId, checklistId, itemIndex, done) {
+async function handleUpdateChecklistItem(childId, checklistId, itemIndex, done) {
   showLoading();
   const result = await updateChecklistItem(
     state.currentFamily.id,
@@ -1491,6 +1917,13 @@ function renderProfileSettings() {
     <p><strong>Name:</strong> ${state.userData.name}</p>
     <p><strong>Email:</strong> ${state.userData.email}</p>
     <p><strong>Role:</strong> ${state.userData.role === 'parent' ? 'Parent/Guardian' : 'Babysitter'}</p>
+    <hr style="margin: 16px 0;">
+    <button class="btn btn-outline btn-full" onclick="switchProfile()" style="color: #e76f51; border-color: #e76f51;">
+      Switch Role
+    </button>
+    <p style="font-size: 0.8em; color: #999; margin-top: 8px; text-align: center;">
+      Change between Parent and Babysitter profiles
+    </p>
   `);
 }
 
@@ -1498,6 +1931,45 @@ function copyInviteCode() {
   const code = state.currentFamily.inviteCode;
   navigator.clipboard.writeText(code).then(() => {
     showToast('Copied!', 'success');
+  });
+}
+
+async function switchProfile() {
+  closeModal();
+
+  // Confirm with user
+  showModal(`
+    <h3>Switch Role</h3>
+    <p>This will change your profile type. You'll need to select a new role and set up your family connection again.</p>
+    <p style="margin-top: 12px; font-weight: 600;">Current role: ${state.userData.role === 'parent' ? 'Parent/Guardian' : 'Babysitter'}</p>
+    <div style="display: flex; gap: 8px; margin-top: 20px;">
+      <button class="btn btn-primary" id="confirm-switch-btn" style="flex: 1; background: #e76f51;">Confirm Switch</button>
+      <button class="btn btn-outline" onclick="closeModal()" style="flex: 1;">Cancel</button>
+    </div>
+  `);
+
+  document.getElementById('confirm-switch-btn')?.addEventListener('click', async () => {
+    closeModal();
+    showLoading();
+
+    try {
+      const firestore = getFirestore();
+      // Clear role and family so user goes through selection again
+      await firestore.collection('users').doc(state.currentUser.uid).update({
+        role: null,
+        familyId: null
+      });
+
+      state.userData.role = null;
+      state.userData.familyId = null;
+      state.currentFamily = null;
+
+      hideLoading();
+      renderRoleSelect();
+    } catch (err) {
+      hideLoading();
+      showToast('Failed to switch role: ' + err.message, 'error');
+    }
   });
 }
 
@@ -1609,6 +2081,18 @@ async function renderSearchResults(term) {
 // UI UTILITIES
 // ============================================================================
 
+function renderLoading(message = 'Loading...') {
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="auth-container">
+      <div class="auth-card" style="text-align: center; padding: 3rem;">
+        <div class="spinner"></div>
+        <p style="margin-top: 1rem; color: #666;">${message}</p>
+      </div>
+    </div>
+  `;
+}
+
 function showLoading() {
   const root = document.getElementById('app-root');
   if (!document.getElementById('loading-overlay')) {
@@ -1667,7 +2151,7 @@ function closeModal() {
 // Make global functions available
 window.viewChildGuide = viewChildGuide;
 window.renderChildChecklists = renderChildChecklists;
-window.updateChecklistItem = updateChecklistItem;
+window.handleUpdateChecklistItem = handleUpdateChecklistItem;
 window.deleteChecklistConfirm = deleteChecklistConfirm;
 window.renderAddChecklistForm = renderAddChecklistForm;
 window.saveChecklist = saveChecklist;
@@ -1684,7 +2168,12 @@ window.renderEmergencyContacts = renderEmergencyContacts;
 window.renderDictationScreen = renderDictationScreen;
 window.copyInviteCode = copyInviteCode;
 window.handleLogout = handleLogout;
+window.switchProfile = switchProfile;
 window.renderProfileSettings = renderProfileSettings;
+window.renderAddChildForm = renderAddChildForm;
+window.renderEditChildForm = renderEditChildForm;
+window.deleteChildConfirm = deleteChildConfirm;
+window.saveChild = saveChild;
 window.closeModal = closeModal;
 window.showToast = showToast;
 window.getSectionLabel = getSectionLabel;

@@ -269,12 +269,14 @@ export async function addGuideItem(familyId, childId, sectionKey, item) {
     const updateData = {};
     updateData[sectionKey] = firebase.firestore.FieldValue.arrayUnion(item);
 
+    // Use set with merge so it works even if the doc doesn't exist yet
     await db().collection('families').doc(familyId)
       .collection('children').doc(childId)
-      .collection('careGuide').doc('sections').update(updateData);
+      .collection('careGuide').doc('sections').set(updateData, { merge: true });
 
     return { success: true };
   } catch (error) {
+    console.error('[CribNotes] addGuideItem error:', error);
     return { success: false, error: error.message };
   }
 }
