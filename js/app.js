@@ -572,10 +572,6 @@ async function renderParentDashboard() {
           </div>
 
           <div class="quick-actions">
-            <button class="action-btn action-btn-primary" id="dictate-btn">
-              <span class="icon">🎤</span>
-              <span>Dictate Guide</span>
-            </button>
             <button class="action-btn" id="messages-btn">
               <span class="icon">💬</span>
               <span>Messages</span>
@@ -640,14 +636,6 @@ async function renderParentDashboard() {
   `;
 
   // Event listeners
-  document.getElementById('dictate-btn')?.addEventListener('click', async () => {
-    if (children.length === 0) {
-      showToast('Please add a child first', 'info');
-      return;
-    }
-    await renderDictationScreen(children[0].id);
-  });
-
   document.getElementById('messages-btn')?.addEventListener('click', () => {
     renderMessagesScreen();
   });
