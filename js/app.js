@@ -828,7 +828,10 @@ async function viewChildGuide(childId) {
       <header class="app-header">
         <button class="btn-icon" id="back-btn">←</button>
         <h1 class="header-title">${child.name}'s Guide</h1>
-        <button class="btn-icon" id="more-btn">⋯</button>
+        <div style="display: flex; gap: 4px;">
+          ${isParent ? `<button class="btn-icon" id="dictate-guide-btn" title="Dictate Guide">🎤</button>` : ''}
+          <button class="btn-icon" id="more-btn">⋯</button>
+        </div>
       </header>
 
       <main class="app-content">
@@ -908,6 +911,10 @@ async function viewChildGuide(childId) {
     }
   });
 
+  document.getElementById('dictate-guide-btn')?.addEventListener('click', () => {
+    renderDictationScreen(childId);
+  });
+
   document.getElementById('more-btn')?.addEventListener('click', () => {
     renderChildMenu(childId);
   });
@@ -985,6 +992,7 @@ async function renderDictationScreen(childId) {
     return;
   }
 
+  state.currentChild = childId;
   const child = await getChild(state.currentFamily.id, childId);
   if (!child.success) {
     showToast('Error loading child', 'error');
@@ -996,35 +1004,45 @@ async function renderDictationScreen(childId) {
     <div class="app-layout">
       <header class="app-header">
         <button class="btn-icon" id="back-btn">←</button>
-        <h1 class="header-title">Dictate Guide</h1>
+        <h1 class="header-title">Dictate for ${child.data.name}</h1>
       </header>
 
       <main class="app-content dictation-screen">
         <div class="container">
           <div class="dictation-card">
-            <div id="recording-status" class="recording-status hidden">
-              <div class="pulse-dot"></div>
-              <span>Listening...</span>
+            <p style="text-align: center; color: #666; margin-bottom: 1rem;">
+              Talk about ${child.data.name}'s care and I'll organize it into the right sections automatically.
+            </p>
+
+            <div id="mic-area" style="text-align: center; margin: 1.5rem 0;">
+              <button id="start-btn" class="mic-button">
+                <span class="mic-icon">🎤</span>
+                <span>Start Dictation</span>
+              </button>
+
+              <div id="recording-area" style="display: none;">
+                <div class="recording-status">
+                  <div class="pulse-dot"></div>
+                  <span>Listening...</span>
+                </div>
+                <button id="stop-btn" class="btn btn-primary" style="margin-top: 1rem; background: #e74c3c; min-width: 180px; padding: 12px 24px; font-size: 1.1em;">
+                  Stop Dictation
+                </button>
+              </div>
             </div>
 
-            <button id="mic-btn" class="mic-button">
-              <span class="mic-icon">🎤</span>
-              <span>Start Recording</span>
-            </button>
-
-            <div id="transcript-display" class="transcript-display">
-              <p id="final-text" class="final-text"></p>
-              <p id="interim-text" class="interim-text"></p>
+            <div id="transcript-display" class="transcript-display" style="min-height: 60px;">
+              <p id="final-text" class="final-text" style="white-space: pre-wrap;"></p>
+              <p id="interim-text" class="interim-text" style="color: #999; font-style: italic;"></p>
             </div>
 
-            <div id="categories" class="categories hidden">
-              <h4>Suggested Categories:</h4>
-              <div id="category-list"></div>
-            </div>
-
-            <div id="actions" class="actions hidden">
-              <button class="btn btn-primary" id="save-btn">Save to Guide</button>
-              <button class="btn btn-outline" id="retake-btn">Retake</button>
+            <div id="organized-results" style="display: none; margin-top: 1.5rem;">
+              <h4 style="margin-bottom: 0.75rem;">Organized into sections:</h4>
+              <div id="results-list"></div>
+              <div style="display: flex; gap: 8px; margin-top: 1.5rem;">
+                <button class="btn btn-primary" id="save-all-btn" style="flex: 1;">Save All to Guide</button>
+                <button class="btn btn-outline" id="retake-btn">Redo</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1034,111 +1052,152 @@ async function renderDictationScreen(childId) {
 
   let isRecording = false;
   let finalTranscript = '';
-  let selectedCategory = null;
+  let organizedItems = {};
 
-  const micBtn = document.getElementById('mic-btn');
-  const recordingStatus = document.getElementById('recording-status');
+  const startBtn = document.getElementById('start-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  const recordingArea = document.getElementById('recording-area');
   const finalText = document.getElementById('final-text');
   const interimText = document.getElementById('interim-text');
-  const categoriesDiv = document.getElementById('categories');
-  const categoryList = document.getElementById('category-list');
-  const actionsDiv = document.getElementById('actions');
+  const organizedResults = document.getElementById('organized-results');
+  const resultsList = document.getElementById('results-list');
 
-  // Mic button listener
-  micBtn.addEventListener('click', async () => {
-    if (!isRecording) {
-      isRecording = true;
-      micBtn.classList.add('recording');
-      recordingStatus.classList.remove('hidden');
-      finalText.textContent = '';
-      interimText.textContent = '';
+  // Start dictation
+  startBtn.addEventListener('click', async () => {
+    if (isRecording) return;
+    isRecording = true;
+    startBtn.style.display = 'none';
+    recordingArea.style.display = 'block';
+    finalText.textContent = '';
+    interimText.textContent = '';
+    organizedResults.style.display = 'none';
 
-      try {
-        const result = await startDictation();
-        if (result.success) {
-          finalTranscript = result.transcript;
-          isRecording = false;
-          micBtn.classList.remove('recording');
-          recordingStatus.classList.add('hidden');
-
-          if (finalTranscript.length > 0) {
-            finalText.textContent = finalTranscript;
-
-            // Show categories
-            const cats = categorizeText(finalTranscript);
-            if (cats.length > 0) {
-              categoryList.innerHTML = cats.map((cat, idx) => `
-                <div class="category-option" onclick="selectCategory('${cat.category}', this)">
-                  <input type="radio" name="category" value="${cat.category}"
-                    ${idx === 0 ? 'checked' : ''}>
-                  <label>${getSectionLabel(cat.category)}</label>
-                  <span class="confidence">${Math.round(cat.confidence * 100)}%</span>
-                </div>
-              `).join('');
-              selectedCategory = cats[0].category;
-
-              categoriesDiv.classList.remove('hidden');
-              actionsDiv.classList.remove('hidden');
-            }
-          }
-        }
-      } catch (error) {
+    try {
+      const result = await startDictation();
+      if (result.success) {
+        finalTranscript = result.transcript;
         isRecording = false;
-        micBtn.classList.remove('recording');
-        recordingStatus.classList.add('hidden');
-        showToast(error.message, 'error');
+        recordingArea.style.display = 'none';
+        startBtn.style.display = 'inline-flex';
+        interimText.textContent = '';
+
+        if (finalTranscript.trim().length > 0) {
+          finalText.textContent = finalTranscript;
+          showOrganizedResults(finalTranscript);
+        } else {
+          showToast('No speech detected. Try again.', 'info');
+        }
       }
+    } catch (error) {
+      isRecording = false;
+      recordingArea.style.display = 'none';
+      startBtn.style.display = 'inline-flex';
+      showToast(error.message, 'error');
     }
   });
 
-  // Transcript updates
-  window.addEventListener('dictationUpdate', (e) => {
+  // Stop dictation
+  stopBtn.addEventListener('click', () => {
+    stopDictation();
+  });
+
+  // Live transcript updates
+  const dictationHandler = (e) => {
+    if (e.detail.final) {
+      finalText.textContent = e.detail.final;
+    }
     if (e.detail.interim) {
-      interimText.textContent = '...' + e.detail.interim;
+      interimText.textContent = e.detail.interim;
+    } else {
+      interimText.textContent = '';
     }
-  });
-
-  // Category selection
-  window.selectCategory = function(category, element) {
-    selectedCategory = category;
-    document.querySelectorAll('.category-option input').forEach(r => r.checked = false);
-    element.querySelector('input').checked = true;
   };
+  window.addEventListener('dictationUpdate', dictationHandler);
 
-  // Save
-  document.getElementById('save-btn')?.addEventListener('click', async () => {
-    if (!finalTranscript || !selectedCategory) {
+  // Organize transcript into guide sections
+  function showOrganizedResults(transcript) {
+    // Split transcript into sentences
+    const sentences = transcript
+      .replace(/([.!?])\s*/g, '$1|')
+      .split('|')
+      .map(s => s.trim())
+      .filter(s => s.length > 3);
+
+    organizedItems = {};
+
+    // Categorize each sentence
+    sentences.forEach(sentence => {
+      const cats = categorizeText(sentence);
+      const bestCategory = cats.length > 0 ? cats[0].category : 'dailySchedule';
+      if (!organizedItems[bestCategory]) {
+        organizedItems[bestCategory] = [];
+      }
+      organizedItems[bestCategory].push(sentence);
+    });
+
+    // If only one or no sentences found, treat whole transcript as one item
+    if (sentences.length <= 1) {
+      const cats = categorizeText(transcript);
+      const bestCategory = cats.length > 0 ? cats[0].category : 'dailySchedule';
+      organizedItems = { [bestCategory]: [transcript.trim()] };
+    }
+
+    // Render results
+    resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
+      <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+        <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
+        <ul style="margin: 4px 0 0 16px; padding: 0;">
+          ${items.map(item => `<li style="margin: 4px 0; color: #444;">${item}</li>`).join('')}
+        </ul>
+      </div>
+    `).join('');
+
+    organizedResults.style.display = 'block';
+  }
+
+  // Save all organized items to guide
+  document.getElementById('save-all-btn')?.addEventListener('click', async () => {
+    if (Object.keys(organizedItems).length === 0) {
       showToast('Nothing to save', 'error');
       return;
     }
 
     showLoading();
+    let savedCount = 0;
+    let errorCount = 0;
 
-    const result = await addGuideItem(
-      state.currentFamily.id,
-      childId,
-      selectedCategory,
-      finalTranscript
-    );
-
-    if (!result.success) {
-      showToast(result.error, 'error');
-      hideLoading();
-    } else {
-      showToast('Saved to ' + getSectionLabel(selectedCategory), 'success');
-      setTimeout(() => viewChildGuide(childId), 1500);
+    for (const [section, items] of Object.entries(organizedItems)) {
+      for (const item of items) {
+        const result = await addGuideItem(state.currentFamily.id, childId, section, item);
+        if (result.success) savedCount++;
+        else errorCount++;
+      }
     }
+
+    hideLoading();
+    if (errorCount > 0) {
+      showToast(`Saved ${savedCount} items, ${errorCount} failed`, 'error');
+    } else {
+      showToast(`Saved ${savedCount} items to guide!`, 'success');
+    }
+    setTimeout(() => viewChildGuide(childId), 1000);
   });
 
   // Retake
   document.getElementById('retake-btn')?.addEventListener('click', () => {
-    renderDictationScreen(childId);
+    finalTranscript = '';
+    organizedItems = {};
+    finalText.textContent = '';
+    interimText.textContent = '';
+    organizedResults.style.display = 'none';
+    startBtn.style.display = 'inline-flex';
   });
 
-  // Back
+  // Back - clean up listener
   document.getElementById('back-btn')?.addEventListener('click', () => {
     stopDictation();
-    renderParentDashboard();
+    window.removeEventListener('dictationUpdate', dictationHandler);
+    viewChildGuide(childId);
   });
 }
 
