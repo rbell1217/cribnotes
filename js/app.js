@@ -1070,11 +1070,14 @@ async function renderDictationScreen(childId) {
     try {
       const result = await startDictation();
       if (result.success) {
-        finalTranscript = result.transcript;
+        // Use the returned transcript, or fall back to whatever text was displayed on screen
+        finalTranscript = result.transcript || finalText.textContent || window._lastDictationText || '';
         isRecording = false;
         recordingArea.style.display = 'none';
         startBtn.style.display = 'inline-flex';
         interimText.textContent = '';
+
+        console.log('[CribNotes] Dictation result transcript length:', result.transcript?.length, 'Final used:', finalTranscript.length);
 
         if (finalTranscript.trim().length > 0) {
           finalText.textContent = finalTranscript;

@@ -134,10 +134,14 @@ export function startDictation() {
 
     recognition.onend = () => {
       isListening = false;
+      // Use finalTranscript if available; fall back to last interim text
+      // (Chrome sometimes doesn't finalize results before onend fires)
+      const transcript = finalTranscript.trim() || interimTranscript.trim();
+      console.log('[CribNotes] Dictation ended. Final:', finalTranscript.length, 'Interim:', interimTranscript.length, 'Using:', transcript.length);
       resolve({
         success: true,
-        transcript: finalTranscript,
-        categories: categorizeText(finalTranscript)
+        transcript: transcript,
+        categories: categorizeText(transcript)
       });
     };
 
@@ -153,6 +157,9 @@ export function startDictation() {
           interimTranscript += transcript;
         }
       }
+
+      // Keep a running copy of all text (final + current interim) as backup
+      window._lastDictationText = (finalTranscript + interimTranscript).trim();
 
       // Dispatch event with live updates
       window.dispatchEvent(new CustomEvent('dictationUpdate', {
