@@ -1305,8 +1305,38 @@ async function extractTextFromPDF(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const pageText = content.items.map(item => item.str).join(' ');
-    fullText += pageText + '\n';
+
+    // Use y-coordinates to detect line and paragraph breaks.
+    // PDF.js items have transform[5] = y position (higher = higher on page).
+    let lastY = null;
+    let lastHeight = 12;
+    let pageText = '';
+
+    for (const item of content.items) {
+      const y = item.transform ? item.transform[5] : null;
+      const height = item.height || lastHeight;
+
+      if (lastY !== null && y !== null) {
+        const yDiff = Math.abs(lastY - y);
+
+        if (yDiff > height * 1.8) {
+          // Large gap = paragraph break
+          pageText += '\n\n';
+        } else if (yDiff > height * 0.5) {
+          // Normal line break
+          pageText += '\n';
+        } else if (item.str && !item.str.startsWith(' ') && pageText && !pageText.endsWith(' ') && !pageText.endsWith('\n')) {
+          // Same line, add space between words
+          pageText += ' ';
+        }
+      }
+
+      pageText += item.str;
+      if (y !== null) lastY = y;
+      if (height > 0) lastHeight = height;
+    }
+
+    fullText += pageText + '\n\n';
   }
 
   return fullText.trim();
