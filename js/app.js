@@ -355,6 +355,19 @@ async function handlePasswordReset(e) {
   hideLoading();
 }
 
+async function handleChangeRole() {
+  showLoading();
+  const result = await setUserRole(null);
+  if (result.success) {
+    state.userData.role = null;
+    hideLoading();
+    renderRoleSelect();
+  } else {
+    showToast(result.error || 'Failed to change role', 'error');
+    hideLoading();
+  }
+}
+
 // ============================================================================
 // ROLE SELECTION
 // ============================================================================
@@ -422,6 +435,10 @@ function renderParentOnboarding() {
           </div>
           <button type="submit" class="btn btn-primary btn-full">Create Family</button>
         </form>
+
+        <div class="divider"></div>
+
+        <button id="change-role-btn" class="btn btn-outline btn-full">Change Role</button>
       </div>
     </div>
   `;
@@ -445,6 +462,8 @@ function renderParentOnboarding() {
       // Route will be triggered by auth state change
     }
   });
+
+  document.getElementById('change-role-btn').addEventListener('click', handleChangeRole);
 }
 
 // ============================================================================
@@ -471,7 +490,8 @@ function renderSitterOnboarding() {
 
         <div class="divider"></div>
 
-        <button id="logout-btn" class="btn btn-outline btn-full">Sign Out</button>
+        <button id="change-role-btn" class="btn btn-outline btn-full">Change Role</button>
+        <button id="logout-btn" class="btn btn-outline btn-full" style="margin-top: 0.5rem;">Sign Out</button>
       </div>
     </div>
   `;
@@ -490,6 +510,8 @@ function renderSitterOnboarding() {
       state.currentFamily = { id: result.familyId };
     }
   });
+
+  document.getElementById('change-role-btn').addEventListener('click', handleChangeRole);
 
   document.getElementById('logout-btn').addEventListener('click', async () => {
     await signOut();
