@@ -73,11 +73,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (user && userData) {
       // Load family data if user has one
       if (userData.familyId) {
-        const familyResult = await getFamily(userData.familyId);
-        if (familyResult.success) {
-          state.currentFamily = familyResult.data;
+        try {
+          const familyResult = await getFamily(userData.familyId);
+          if (familyResult.success) {
+            state.currentFamily = familyResult.data;
+          } else {
+            console.warn('Failed to load family:', familyResult.error);
+            state.currentFamily = null;
+          }
+        } catch (err) {
+          console.error('Error loading family:', err);
+          state.currentFamily = null;
         }
+      } else {
+        state.currentFamily = null;
       }
+    } else {
+      state.currentFamily = null;
     }
 
     // Route to appropriate screen
@@ -403,6 +415,10 @@ function renderRoleSelect() {
     if (!result.success) {
       showToast(result.error, 'error');
       hideLoading();
+    } else {
+      state.userData.role = 'parent';
+      hideLoading();
+      await routeApp();
     }
   });
 
@@ -412,6 +428,10 @@ function renderRoleSelect() {
     if (!result.success) {
       showToast(result.error, 'error');
       hideLoading();
+    } else {
+      state.userData.role = 'babysitter';
+      hideLoading();
+      await routeApp();
     }
   });
 }
@@ -459,7 +479,8 @@ function renderParentOnboarding() {
         inviteCode: result.inviteCode
       };
       showToast('Family created!', 'success');
-      // Route will be triggered by auth state change
+      hideLoading();
+      await routeApp();
     }
   });
 
@@ -508,6 +529,8 @@ function renderSitterOnboarding() {
     } else {
       showToast('Joined family!', 'success');
       state.currentFamily = { id: result.familyId };
+      hideLoading();
+      await routeApp();
     }
   });
 
@@ -1750,6 +1773,10 @@ window.renderDictationScreen = renderDictationScreen;
 window.copyInviteCode = copyInviteCode;
 window.handleLogout = handleLogout;
 window.renderProfileSettings = renderProfileSettings;
+window.renderAddChildForm = renderAddChildForm;
+window.renderEditChildForm = renderEditChildForm;
+window.deleteChildConfirm = deleteChildConfirm;
+window.saveChild = saveChild;
 window.closeModal = closeModal;
 window.showToast = showToast;
 window.getSectionLabel = getSectionLabel;
