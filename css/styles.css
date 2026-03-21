@@ -595,6 +595,31 @@ textarea {
    DICTATION
    ============================================================================ */
 
+.guide-action-buttons {
+  display: flex;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-lg);
+}
+
+.guide-action-buttons .dictate-banner-btn {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+.upload-banner-btn {
+  border-color: var(--color-teal) !important;
+  background: linear-gradient(135deg, rgba(42, 157, 143, 0.08), rgba(42, 157, 143, 0.12)) !important;
+}
+
+.upload-banner-btn:hover {
+  background: linear-gradient(135deg, rgba(42, 157, 143, 0.15), rgba(42, 157, 143, 0.2)) !important;
+  box-shadow: 0 4px 12px rgba(42, 157, 143, 0.25) !important;
+}
+
+.upload-banner-btn .dictate-banner-icon {
+  background: var(--color-teal);
+}
+
 .dictate-banner-btn {
   display: flex;
   align-items: center;
