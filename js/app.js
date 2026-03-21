@@ -25,6 +25,8 @@ import {
   startDictation, stopDictation, abortDictation
 } from './dictation.js';
 
+import { processTranscript } from './textProcessor.js';
+
 import { isFirebaseConfigured } from './config.js';
 
 // ============================================================================
@@ -1113,83 +1115,41 @@ async function renderDictationScreen(childId) {
   window.addEventListener('dictationUpdate', dictationHandler);
 
   // Organize transcript into guide sections
-  function showOrganizedResults(transcript) {
-    // Split transcript into chunks using multiple strategies:
-    // 1. First try punctuation (.!?)
-    // 2. Then split long remaining chunks on conjunctions/pauses
-    // 3. Finally split very long chunks by comma
-    let chunks = [];
-
-    // Step 1: Split on sentence-ending punctuation
-    let rawParts = transcript
-      .replace(/([.!?])\s*/g, '$1|||')
-      .split('|||')
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-
-    // Step 2: For each part, if it's long (likely no punctuation from speech),
-    // split on conjunctions and transitional words
-    const conjunctionPattern = /\b(and then|and also|also|then|but|however|plus|next|after that|before that|for)\b/gi;
-
-    rawParts.forEach(part => {
-      if (part.length > 80) {
-        // Try splitting on conjunctions
-        const subParts = part.split(conjunctionPattern)
-          .map(s => s.trim())
-          .filter(s => s.length > 5 && !s.match(/^(and then|and also|also|then|but|however|plus|next|after that|before that|for)$/i));
-
-        if (subParts.length > 1) {
-          chunks.push(...subParts);
-        } else {
-          // Try splitting on commas for long text
-          const commaParts = part.split(',')
-            .map(s => s.trim())
-            .filter(s => s.length > 5);
-
-          if (commaParts.length > 1) {
-            chunks.push(...commaParts);
-          } else {
-            chunks.push(part);
-          }
-        }
-      } else if (part.length > 3) {
-        chunks.push(part);
-      }
-    });
-
-    // If still just one chunk (speech had no punctuation, commas, or conjunctions),
-    // treat the whole transcript as a single item
-    if (chunks.length === 0) {
-      chunks = [transcript.trim()];
-    }
-
-    console.log('[CribNotes] Transcript chunks:', chunks);
-
-    organizedItems = {};
-
-    // Categorize each chunk
-    chunks.forEach(chunk => {
-      const cats = categorizeText(chunk);
-      const bestCategory = cats.length > 0 ? cats[0].category : 'dailySchedule';
-      if (!organizedItems[bestCategory]) {
-        organizedItems[bestCategory] = [];
-      }
-      organizedItems[bestCategory].push(chunk);
-    });
-
-    console.log('[CribNotes] Organized items:', JSON.stringify(organizedItems));
-
-    // Render results
-    resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
-      <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
-        <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
-        <ul style="margin: 4px 0 0 16px; padding: 0;">
-          ${items.map(item => `<li style="margin: 4px 0; color: #444;">${item}</li>`).join('')}
-        </ul>
+  async function showOrganizedResults(transcript) {
+    // Show processing indicator
+    resultsList.innerHTML = `
+      <div style="text-align: center; padding: 20px; color: #666;">
+        <div style="font-size: 1.5em; margin-bottom: 8px;">Organizing your notes...</div>
+        <div style="font-size: 0.9em;">Cleaning up and categorizing</div>
       </div>
-    `).join('');
-
+    `;
     organizedResults.style.display = 'block';
+
+    try {
+      // Process transcript through AI or smart cleanup
+      const result = await processTranscript(transcript, child.data.name);
+      console.log('[CribNotes] Processed result:', JSON.stringify(result));
+
+      organizedItems = result.sections || {};
+
+      if (Object.keys(organizedItems).length === 0) {
+        resultsList.innerHTML = `<p style="color: #666; text-align: center;">Could not organize the text. Try dictating again with more detail.</p>`;
+        return;
+      }
+
+      // Render polished results
+      resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
+        <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+          <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
+          <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
+            ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #e76f51; line-height: 1.4;">${item}</li>`).join('')}
+          </ul>
+        </div>
+      `).join('');
+    } catch (error) {
+      console.error('[CribNotes] Processing error:', error);
+      resultsList.innerHTML = `<p style="color: #e74c3c;">Error processing text: ${error.message}</p>`;
+    }
   }
 
   // Save all organized items to guide
