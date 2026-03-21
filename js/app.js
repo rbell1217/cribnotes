@@ -98,10 +98,34 @@ async function routeApp() {
     state.currentScreen = 'auth-login';
     renderAuthLogin();
   } else if (!state.userData) {
-    // User logged in but no profile (shouldn't happen)
-    await signOut();
-    state.currentScreen = 'auth-login';
-    renderAuthLogin();
+    // User logged in but no profile yet -- wait briefly for it to be created
+    // This handles the race condition during signup where auth fires before Firestore write completes
+    state.currentScreen = 'auth-loading';
+    renderLoading('Setting up your account...');
+    // Retry loading user data after a short delay
+    setTimeout(async () => {
+      try {
+        const firestore = getFirestore();
+        const docSnap = await firestore.collection('users').doc(state.currentUser.uid).get();
+        if (docSnap.exists) {
+          state.userData = docSnap.data();
+          await routeApp();
+        } else {
+          // Still no profile after retry -- sign out
+          await signOut();
+          state.currentScreen = 'auth-login';
+          renderAuthLogin();
+          showToast('Account setup failed. Please try again.', 'error');
+        }
+      } catch (error) {
+        console.error('Error loading user profile on retry:', error);
+        await signOut();
+        state.currentScreen = 'auth-login';
+        renderAuthLogin();
+        showToast('Error loading account. Please try again.', 'error');
+      }
+    }, 1500);
+    return;
   } else if (!state.userData.role) {
     // User logged in but no role set
     state.currentScreen = 'auth-role-select';
@@ -218,6 +242,12 @@ function renderAuthSignup() {
           <button type="submit" class="btn btn-primary">Create Account</button>
         </form>
 
+        <div class="auth-divider">OR</div>
+
+        <button id="google-signup-btn" class="btn btn-outline btn-full">
+          <span>Sign up with Google</span>
+        </button>
+
         <div class="auth-footer">
           <p>Already have an account? <a href="#" id="go-to-login">Sign in</a></p>
         </div>
@@ -226,6 +256,7 @@ function renderAuthSignup() {
   `;
 
   document.getElementById('signup-form').addEventListener('submit', handleSignup);
+  document.getElementById('google-signup-btn').addEventListener('click', handleGoogleLogin);
   document.getElementById('go-to-login').addEventListener('click', (e) => {
     e.preventDefault();
     renderAuthLogin();
@@ -1608,6 +1639,18 @@ async function renderSearchResults(term) {
 // ============================================================================
 // UI UTILITIES
 // ============================================================================
+
+function renderLoading(message = 'Loading...') {
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="auth-container">
+      <div class="auth-card" style="text-align: center; padding: 3rem;">
+        <div class="spinner"></div>
+        <p style="margin-top: 1rem; color: #666;">${message}</p>
+      </div>
+    </div>
+  `;
+}
 
 function showLoading() {
   const root = document.getElementById('app-root');
