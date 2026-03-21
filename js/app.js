@@ -1120,7 +1120,7 @@ async function renderChildChecklists(childId) {
                       ${checklist.items.map((item, idx) => `
                         <li>
                           <input type="checkbox" ${item.done ? 'checked' : ''}
-                            onchange="updateChecklistItem('${childId}', '${checklist.id}', ${idx}, this.checked)">
+                            onchange="handleUpdateChecklistItem('${childId}', '${checklist.id}', ${idx}, this.checked)">
                           <label>${item.text}</label>
                         </li>
                       `).join('')}
@@ -1146,7 +1146,7 @@ async function renderChildChecklists(childId) {
   }
 }
 
-async function updateChecklistItem(childId, checklistId, itemIndex, done) {
+async function handleUpdateChecklistItem(childId, checklistId, itemIndex, done) {
   showLoading();
   const result = await updateChecklistItem(
     state.currentFamily.id,
@@ -1667,7 +1667,7 @@ function closeModal() {
 // Make global functions available
 window.viewChildGuide = viewChildGuide;
 window.renderChildChecklists = renderChildChecklists;
-window.updateChecklistItem = updateChecklistItem;
+window.handleUpdateChecklistItem = handleUpdateChecklistItem;
 window.deleteChecklistConfirm = deleteChecklistConfirm;
 window.renderAddChecklistForm = renderAddChecklistForm;
 window.saveChecklist = saveChecklist;
