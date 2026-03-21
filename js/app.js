@@ -828,14 +828,21 @@ async function viewChildGuide(childId) {
       <header class="app-header">
         <button class="btn-icon" id="back-btn">←</button>
         <h1 class="header-title">${child.name}'s Guide</h1>
-        <div style="display: flex; gap: 4px;">
-          ${isParent ? `<button class="btn-icon" id="dictate-guide-btn" title="Dictate Guide">🎤</button>` : ''}
-          <button class="btn-icon" id="more-btn">⋯</button>
-        </div>
+        <button class="btn-icon" id="more-btn">⋯</button>
       </header>
 
       <main class="app-content">
         <div class="container">
+          ${isParent ? `
+          <button id="dictate-guide-btn" class="dictate-banner-btn">
+            <span class="dictate-banner-icon">🎤</span>
+            <span class="dictate-banner-text">
+              <strong>Dictate Care Guide</strong>
+              <small>Speak and auto-organize into sections</small>
+            </span>
+          </button>
+          ` : ''}
+
           <div class="tabs">
             ${getGuideSections().map(section => `
               <button class="tab-btn" data-section="${section}">
@@ -1116,31 +1123,70 @@ async function renderDictationScreen(childId) {
 
   // Organize transcript into guide sections
   function showOrganizedResults(transcript) {
-    // Split transcript into sentences
-    const sentences = transcript
-      .replace(/([.!?])\s*/g, '$1|')
-      .split('|')
+    // Split transcript into chunks using multiple strategies:
+    // 1. First try punctuation (.!?)
+    // 2. Then split long remaining chunks on conjunctions/pauses
+    // 3. Finally split very long chunks by comma
+    let chunks = [];
+
+    // Step 1: Split on sentence-ending punctuation
+    let rawParts = transcript
+      .replace(/([.!?])\s*/g, '$1|||')
+      .split('|||')
       .map(s => s.trim())
-      .filter(s => s.length > 3);
+      .filter(s => s.length > 0);
+
+    // Step 2: For each part, if it's long (likely no punctuation from speech),
+    // split on conjunctions and transitional words
+    const conjunctionPattern = /\b(and then|and also|also|then|but|however|plus|next|after that|before that|for)\b/gi;
+
+    rawParts.forEach(part => {
+      if (part.length > 80) {
+        // Try splitting on conjunctions
+        const subParts = part.split(conjunctionPattern)
+          .map(s => s.trim())
+          .filter(s => s.length > 5 && !s.match(/^(and then|and also|also|then|but|however|plus|next|after that|before that|for)$/i));
+
+        if (subParts.length > 1) {
+          chunks.push(...subParts);
+        } else {
+          // Try splitting on commas for long text
+          const commaParts = part.split(',')
+            .map(s => s.trim())
+            .filter(s => s.length > 5);
+
+          if (commaParts.length > 1) {
+            chunks.push(...commaParts);
+          } else {
+            chunks.push(part);
+          }
+        }
+      } else if (part.length > 3) {
+        chunks.push(part);
+      }
+    });
+
+    // If still just one chunk (speech had no punctuation, commas, or conjunctions),
+    // treat the whole transcript as a single item
+    if (chunks.length === 0) {
+      chunks = [transcript.trim()];
+    }
+
+    console.log('[CribNotes] Transcript chunks:', chunks);
 
     organizedItems = {};
 
-    // Categorize each sentence
-    sentences.forEach(sentence => {
-      const cats = categorizeText(sentence);
+    // Categorize each chunk
+    chunks.forEach(chunk => {
+      const cats = categorizeText(chunk);
       const bestCategory = cats.length > 0 ? cats[0].category : 'dailySchedule';
       if (!organizedItems[bestCategory]) {
         organizedItems[bestCategory] = [];
       }
-      organizedItems[bestCategory].push(sentence);
+      organizedItems[bestCategory].push(chunk);
     });
 
-    // If only one or no sentences found, treat whole transcript as one item
-    if (sentences.length <= 1) {
-      const cats = categorizeText(transcript);
-      const bestCategory = cats.length > 0 ? cats[0].category : 'dailySchedule';
-      organizedItems = { [bestCategory]: [transcript.trim()] };
-    }
+    console.log('[CribNotes] Organized items:', JSON.stringify(organizedItems));
 
     // Render results
     resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
@@ -1165,22 +1211,43 @@ async function renderDictationScreen(childId) {
     showLoading();
     let savedCount = 0;
     let errorCount = 0;
+    let lastError = '';
+
+    console.log('[CribNotes] Saving to family:', state.currentFamily.id, 'child:', childId);
+    console.log('[CribNotes] Items to save:', JSON.stringify(organizedItems));
+
+    // Ensure the care guide doc exists before trying arrayUnion
+    const guideCheck = await getCareGuide(state.currentFamily.id, childId);
+    console.log('[CribNotes] Guide doc check:', guideCheck.success);
 
     for (const [section, items] of Object.entries(organizedItems)) {
       for (const item of items) {
-        const result = await addGuideItem(state.currentFamily.id, childId, section, item);
-        if (result.success) savedCount++;
-        else errorCount++;
+        try {
+          console.log('[CribNotes] Saving item to section:', section, 'item:', item);
+          const result = await addGuideItem(state.currentFamily.id, childId, section, item);
+          console.log('[CribNotes] Save result:', JSON.stringify(result));
+          if (result.success) {
+            savedCount++;
+          } else {
+            errorCount++;
+            lastError = result.error || 'Unknown error';
+            console.error('[CribNotes] Save failed:', result.error);
+          }
+        } catch (err) {
+          errorCount++;
+          lastError = err.message;
+          console.error('[CribNotes] Save exception:', err);
+        }
       }
     }
 
     hideLoading();
     if (errorCount > 0) {
-      showToast(`Saved ${savedCount} items, ${errorCount} failed`, 'error');
+      showToast(`Saved ${savedCount}, ${errorCount} failed: ${lastError}`, 'error');
     } else {
       showToast(`Saved ${savedCount} items to guide!`, 'success');
     }
-    setTimeout(() => viewChildGuide(childId), 1000);
+    setTimeout(() => viewChildGuide(childId), 1200);
   });
 
   // Retake
