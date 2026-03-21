@@ -13,7 +13,7 @@ import {
 import {
   createFamily, getFamily, joinFamilyWithCode,
   addChild, getChildren, getChild, updateChild, deleteChild,
-  getCareGuide, updateGuideSection, addGuideItem, removeGuideItem,
+  getCareGuide, updateGuideSection, addGuideItem, removeGuideItem, clearCareGuide,
   createChecklist, getChecklists, updateChecklistItem, deleteChecklist,
   sendMessage, getMessages,
   addPhotoMetadata, getPhotos, deletePhoto,
@@ -944,7 +944,8 @@ function renderChildMenu(childId) {
     <h3>Options</h3>
     ${isParent ? `
       <button class="btn btn-full" onclick="renderEditChildForm('${childId}')">Edit Child</button>
-      <button class="btn btn-full" onclick="deleteChildConfirm('${childId}')">Delete Child</button>
+      <button class="btn btn-full" onclick="clearGuideConfirm('${childId}')" style="color: #e76f51;">Clear Care Guide</button>
+      <button class="btn btn-full" onclick="deleteChildConfirm('${childId}')" style="color: #c0392b;">Delete Child</button>
     ` : ''}
     <button class="btn btn-outline btn-full" onclick="closeModal()">Close</button>
   `);
@@ -963,6 +964,35 @@ async function deleteChildConfirm(childId) {
       renderParentDashboard();
     }
   }
+}
+
+async function clearGuideConfirm(childId) {
+  closeModal();
+  showModal(`
+    <h3>Clear Care Guide</h3>
+    <p>This will remove all care guide entries for this child. This cannot be undone.</p>
+    <div style="display: flex; gap: 8px; margin-top: 20px;">
+      <button class="btn btn-primary" id="confirm-clear-guide-btn" style="flex: 1; background: #e76f51;">Clear Everything</button>
+      <button class="btn btn-outline" onclick="closeModal()" style="flex: 1;">Cancel</button>
+    </div>
+  `);
+  document.getElementById('confirm-clear-guide-btn')?.addEventListener('click', async () => {
+    closeModal();
+    showLoading();
+    try {
+      const result = await clearCareGuide(state.currentFamily.id, childId);
+      hideLoading();
+      if (result.success) {
+        showToast('Care guide cleared', 'success');
+        viewChildGuide(childId);
+      } else {
+        showToast('Failed to clear guide: ' + result.error, 'error');
+      }
+    } catch (err) {
+      hideLoading();
+      showToast('Error: ' + err.message, 'error');
+    }
+  });
 }
 
 async function editGuideSection(sectionKey) {
@@ -1281,10 +1311,15 @@ async function handleDocumentUpload(file, childId, child) {
     }
 
     console.log('[CribNotes] Extracted text from upload:', extractedText.length, 'chars');
+
+    // Load all children in the family for multi-child distribution
+    const childrenResult = await getChildren(state.currentFamily.id);
+    const allChildren = childrenResult.success ? childrenResult.data : [];
+
     hideLoading();
 
     // Show the extracted text and let user review before organizing
-    renderUploadReview(extractedText, childId, child);
+    renderUploadReview(extractedText, childId, child, allChildren);
 
   } catch (error) {
     hideLoading();
@@ -1352,9 +1387,77 @@ async function extractTextFromDocx(file) {
   return result.value.trim();
 }
 
-function renderUploadReview(extractedText, childId, child) {
+/**
+ * Distribute organized items across multiple children.
+ * Items mentioning a specific child's name go only to that child.
+ * Items not mentioning any specific child are shared across all children.
+ */
+function distributeItemsAcrossChildren(organizedItems, allChildren) {
+  // Build name-to-child map: include nicknames and variations
+  const nameToChild = {};
+  for (const child of allChildren) {
+    const name = (child.name || '').trim();
+    if (!name) continue;
+    // Full name
+    nameToChild[name.toLowerCase()] = child.id;
+    // First name only
+    const firstName = name.split(/\s+/)[0];
+    if (firstName) nameToChild[firstName.toLowerCase()] = child.id;
+    // Common nickname: "Malakai" -> "Kai"
+    if (firstName.toLowerCase() === 'malakai') {
+      nameToChild['kai'] = child.id;
+    }
+  }
+
+  // Result: { childId: { section: [items] } }
+  const perChild = {};
+  for (const child of allChildren) {
+    perChild[child.id] = {};
+  }
+
+  for (const [section, items] of Object.entries(organizedItems)) {
+    for (const item of items) {
+      const itemLower = item.toLowerCase();
+
+      // Check which children are mentioned in this item
+      const mentionedChildIds = new Set();
+      for (const [nameLower, cid] of Object.entries(nameToChild)) {
+        // Use word boundary check to avoid partial matches
+        const regex = new RegExp(`\\b${nameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (regex.test(itemLower)) {
+          mentionedChildIds.add(cid);
+        }
+      }
+
+      if (mentionedChildIds.size === 0) {
+        // No specific child mentioned -- shared item, goes to all children
+        for (const child of allChildren) {
+          if (!perChild[child.id][section]) perChild[child.id][section] = [];
+          perChild[child.id][section].push(item);
+        }
+      } else {
+        // Only save to the mentioned child(ren)
+        for (const cid of mentionedChildIds) {
+          if (!perChild[cid][section]) perChild[cid][section] = [];
+          perChild[cid][section].push(item);
+        }
+      }
+    }
+  }
+
+  return perChild;
+}
+
+function renderUploadReview(extractedText, childId, child, allChildren) {
   const root = document.getElementById('app-root');
   const childName = child.data?.name || child.name || '';
+  const hasMultipleChildren = allChildren.length > 1;
+
+  // Build a display name map for children
+  const childNameMap = {};
+  for (const c of allChildren) {
+    childNameMap[c.id] = c.name || 'Child';
+  }
 
   // Truncate preview if very long
   const previewText = extractedText.length > 1500
@@ -1372,7 +1475,7 @@ function renderUploadReview(extractedText, childId, child) {
         <div class="container">
           <div class="dictation-card">
             <p style="text-align: center; color: #666; margin-bottom: 1rem;">
-              Extracted text from your document. Review and then organize into ${childName}'s care guide.
+              Extracted text from your document.${hasMultipleChildren ? ' Items will be distributed across your children automatically.' : ` Review and organize into ${childName}'s care guide.`}
             </p>
 
             <div id="extracted-text-display" class="transcript-display" style="max-height: 300px; overflow-y: auto; font-size: 0.9em; line-height: 1.5;">
@@ -1403,6 +1506,7 @@ function renderUploadReview(extractedText, childId, child) {
   `;
 
   let organizedItems = {};
+  let perChildDistribution = {};
 
   document.getElementById('back-btn')?.addEventListener('click', () => {
     viewChildGuide(childId);
@@ -1436,14 +1540,49 @@ function renderUploadReview(extractedText, childId, child) {
         return;
       }
 
-      resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
-        <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
-          <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
-          <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
-            ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #2a9d8f; line-height: 1.4;">${item}</li>`).join('')}
-          </ul>
-        </div>
-      `).join('');
+      // Distribute across children if multiple exist
+      if (hasMultipleChildren) {
+        perChildDistribution = distributeItemsAcrossChildren(organizedItems, allChildren);
+
+        // Render per-child breakdown
+        let html = '';
+        for (const c of allChildren) {
+          const childItems = perChildDistribution[c.id] || {};
+          const totalItems = Object.values(childItems).reduce((sum, arr) => sum + arr.length, 0);
+
+          html += `<div style="margin-bottom: 16px;">
+            <div style="background: #1a365d; color: white; padding: 8px 12px; border-radius: 8px 8px 0 0; font-weight: 600;">
+              ${childNameMap[c.id]} <span style="font-weight: 400; opacity: 0.8;">(${totalItems} items)</span>
+            </div>
+            <div style="background: #f8f9fa; border-radius: 0 0 8px 8px; padding: 12px;">`;
+
+          if (totalItems === 0) {
+            html += `<p style="color: #999; margin: 0;">No items specific to this child</p>`;
+          } else {
+            for (const [section, items] of Object.entries(childItems)) {
+              html += `<div style="margin-bottom: 8px;">
+                <strong style="color: #2a9d8f; font-size: 0.9em;">${getSectionLabel(section)}</strong>
+                <ul style="margin: 4px 0 0 16px; padding: 0; list-style: none;">
+                  ${items.map(item => `<li style="margin: 4px 0; color: #333; padding-left: 10px; border-left: 3px solid #2a9d8f; line-height: 1.4; font-size: 0.9em;">${item}</li>`).join('')}
+                </ul>
+              </div>`;
+            }
+          }
+
+          html += `</div></div>`;
+        }
+        resultsList.innerHTML = html;
+      } else {
+        // Single child -- show flat list like before
+        resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
+          <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+            <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
+            <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
+              ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #2a9d8f; line-height: 1.4;">${item}</li>`).join('')}
+            </ul>
+          </div>
+        `).join('');
+      }
     } catch (error) {
       console.error('[CribNotes] Upload processing error:', error);
       resultsList.innerHTML = `<p style="color: #e74c3c;">Error processing document: ${error.message}</p>`;
@@ -1464,27 +1603,45 @@ function renderUploadReview(extractedText, childId, child) {
     let savedCount = 0;
     let errorCount = 0;
 
-    const guideCheck = await getCareGuide(state.currentFamily.id, childId);
-    console.log('[CribNotes] Guide doc check for upload save:', guideCheck.success);
+    if (hasMultipleChildren && Object.keys(perChildDistribution).length > 0) {
+      // Save distributed items to each child
+      for (const c of allChildren) {
+        const childItems = perChildDistribution[c.id] || {};
+        // Initialize guide doc if needed
+        await getCareGuide(state.currentFamily.id, c.id);
 
-    for (const [section, items] of Object.entries(organizedItems)) {
-      for (const item of items) {
-        try {
-          const result = await addGuideItem(state.currentFamily.id, childId, section, item);
-          if (result.success) {
-            savedCount++;
-          } else {
+        for (const [section, items] of Object.entries(childItems)) {
+          for (const item of items) {
+            try {
+              const result = await addGuideItem(state.currentFamily.id, c.id, section, item);
+              if (result.success) savedCount++;
+              else errorCount++;
+            } catch (err) {
+              errorCount++;
+            }
+          }
+        }
+      }
+    } else {
+      // Single child save
+      await getCareGuide(state.currentFamily.id, childId);
+      for (const [section, items] of Object.entries(organizedItems)) {
+        for (const item of items) {
+          try {
+            const result = await addGuideItem(state.currentFamily.id, childId, section, item);
+            if (result.success) savedCount++;
+            else errorCount++;
+          } catch (err) {
             errorCount++;
           }
-        } catch (err) {
-          errorCount++;
         }
       }
     }
 
     hideLoading();
     if (savedCount > 0) {
-      showToast(`Saved ${savedCount} items from document!`, 'success');
+      const childCount = hasMultipleChildren ? ` across ${allChildren.length} children` : '';
+      showToast(`Saved ${savedCount} items${childCount}!`, 'success');
       setTimeout(() => viewChildGuide(childId), 1500);
     } else {
       showToast('Failed to save items', 'error');
@@ -2173,6 +2330,7 @@ window.renderProfileSettings = renderProfileSettings;
 window.renderAddChildForm = renderAddChildForm;
 window.renderEditChildForm = renderEditChildForm;
 window.deleteChildConfirm = deleteChildConfirm;
+window.clearGuideConfirm = clearGuideConfirm;
 window.saveChild = saveChild;
 window.closeModal = closeModal;
 window.showToast = showToast;

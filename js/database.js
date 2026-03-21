@@ -296,6 +296,21 @@ export async function removeGuideItem(familyId, childId, sectionKey, item) {
   }
 }
 
+export async function clearCareGuide(familyId, childId) {
+  try {
+    const init = {};
+    GUIDE_SECTIONS.forEach(section => {
+      init[section] = [];
+    });
+    await db().collection('families').doc(familyId)
+      .collection('children').doc(childId)
+      .collection('careGuide').doc('sections').set(init);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 /**
  * Checklist Operations
  */
