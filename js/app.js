@@ -1396,7 +1396,7 @@ function renderUploadReview(extractedText, childId, child) {
     organizedResults.style.display = 'block';
 
     try {
-      const result = await processTranscript(extractedText, childName);
+      const result = await processTranscript(extractedText, childName, 'document');
       console.log('[CribNotes] Upload processed result:', JSON.stringify(result));
 
       organizedItems = result.sections || {};

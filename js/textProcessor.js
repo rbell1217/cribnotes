@@ -1,52 +1,334 @@
 /**
  * Text Processor Module
- * Cleans up raw speech-to-text transcripts into polished care guide entries.
+ * Processes both speech-to-text transcripts AND uploaded documents
+ * into organized care guide entries.
  *
  * Strategy:
  * 1. Try the AI API endpoint first (if available)
- * 2. Fall back to smart client-side processing with topic-boundary detection
+ * 2. Fall back to smart client-side processing
+ *    - Documents: split on section headers / paragraph boundaries
+ *    - Dictation: split on topic-boundary keyword detection
  */
 
 const API_ENDPOINT = '/api/organize';
 
 /**
- * Process a raw transcript into organized, polished guide sections.
+ * Process text into organized, polished guide sections.
+ * @param {string} transcript - The raw text to process
+ * @param {string} childName - The child's name
+ * @param {string} source - 'dictation' or 'document'
  * Returns: { sections: { sectionKey: ["polished item", ...], ... } }
  */
-export async function processTranscript(transcript, childName) {
+export async function processTranscript(transcript, childName, source = 'dictation') {
+  const isDocument = source === 'document';
+
   // Try AI processing first
   try {
-    const result = await processWithAI(transcript, childName);
+    const result = await processWithAI(transcript, childName, isDocument);
     if (result && result.sections && Object.keys(result.sections).length > 0) {
       console.log('[CribNotes] AI processing succeeded');
       return result;
     }
   } catch (err) {
-    console.log('[CribNotes] AI processing unavailable, using smart cleanup:', err.message);
+    console.log('[CribNotes] AI processing unavailable, using local processing:', err.message);
   }
 
-  // Fall back to client-side smart processing
-  return processLocally(transcript, childName);
+  // Fall back to client-side processing
+  if (isDocument) {
+    return processDocumentLocally(transcript, childName);
+  }
+  return processDictationLocally(transcript, childName);
 }
 
 /**
  * AI-powered processing via serverless function
  */
-async function processWithAI(transcript, childName) {
+async function processWithAI(transcript, childName, isDocument) {
   const response = await fetch(API_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript, childName })
+    body: JSON.stringify({ transcript, childName, isDocument })
   });
 
   if (!response.ok) throw new Error(`API returned ${response.status}`);
   return await response.json();
 }
 
+// ==========================================================================
+// DOCUMENT PROCESSING (for uploaded PDFs, Word docs, etc.)
+// ==========================================================================
+
 /**
- * Smart client-side processing (no API needed)
+ * Process a structured document by splitting on section headers
+ * and categorizing each section by its header text and content.
  */
-function processLocally(transcript, childName) {
+function processDocumentLocally(text, childName) {
+  console.log('[CribNotes] Processing document locally, length:', text.length);
+
+  // Step 1: Split document into sections by detecting headers
+  const docSections = splitDocumentBySections(text);
+  console.log('[CribNotes] Document sections found:', docSections.map(s => s.header));
+
+  // Step 2: Map each document section to a care guide category
+  const sections = {};
+  for (const docSection of docSections) {
+    const category = categorizeDocumentSection(docSection.header, docSection.content);
+
+    if (!sections[category]) sections[category] = [];
+
+    // Split content into individual items (bullet points, paragraphs, etc.)
+    const items = extractDocumentItems(docSection.content);
+    for (const item of items) {
+      const cleaned = cleanDocumentText(item);
+      if (cleaned.length > 5) {
+        sections[category].push(cleaned);
+      }
+    }
+  }
+
+  // Step 3: Deduplicate within each section
+  for (const key of Object.keys(sections)) {
+    sections[key] = mergeSimilarItems(sections[key]);
+  }
+
+  return { sections };
+}
+
+/**
+ * Split document text into sections based on header patterns.
+ * Detects blank-line separated headers, title-case lines, and known section names.
+ */
+function splitDocumentBySections(text) {
+  const lines = text.split('\n');
+  const sections = [];
+  let currentHeader = 'General';
+  let currentContent = [];
+
+  // Patterns that indicate a section header
+  const headerPatterns = [
+    /^(key contacts|contacts at a glance|emergency|important contacts)/i,
+    /^(locations?|home|apartment|getting to)/i,
+    /^(daily schedul|schedule|saturday|sunday|monday|tuesday|wednesday|thursday|friday)/i,
+    /^(meals?\s*&?\s*snacks?|breakfast|lunch|dinner|food|snack options|meal tips)/i,
+    /^(naps?\s*&?\s*bedtime|sleep|bedtime|nap time)/i,
+    /^(diapers?\s*&?\s*potty|toilet|diaper|potty training)/i,
+    /^(safety\s*tips?|important|watch out|car\s*&?\s*car seats?)/i,
+    /^(tv\s*&?\s*music|tv\s*&?\s*entertainment|screen time|streaming|tv shows)/i,
+    /^(car\s*&?\s*travel|car seat|parking|driving)/i,
+    /^(activit|toys?|play|outdoor|things to do)/i,
+    /^(medical|medication|allerg|health|doctor)/i,
+    /^(school|daycare|pickup|drop.?off)/i,
+    /^(morning checklist|afternoon pickup|returning from)/i,
+    /^(12th floor|amenities|parking garage)/i,
+    /^(comfort items|night wakings|quiet time)/i,
+  ];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    // Check if this line looks like a header
+    const isHeader = isDocumentHeader(line, lines, i, headerPatterns);
+
+    if (isHeader && currentContent.length > 0) {
+      // Save previous section
+      sections.push({
+        header: currentHeader,
+        content: currentContent.join('\n').trim()
+      });
+      currentHeader = line;
+      currentContent = [];
+    } else if (isHeader && currentContent.length === 0) {
+      currentHeader = line;
+    } else {
+      currentContent.push(line);
+    }
+  }
+
+  // Save last section
+  if (currentContent.length > 0) {
+    sections.push({
+      header: currentHeader,
+      content: currentContent.join('\n').trim()
+    });
+  }
+
+  return sections.filter(s => s.content.length > 5);
+}
+
+/**
+ * Determine if a line is a section header based on multiple signals.
+ */
+function isDocumentHeader(line, allLines, idx, headerPatterns) {
+  // Skip very long lines (headers are short)
+  if (line.length > 100) return false;
+
+  // Skip lines that look like bullet points
+  if (/^[•\-\*\d]/.test(line) && line.length > 5) return false;
+
+  // Check if it matches known header patterns
+  for (const pattern of headerPatterns) {
+    if (pattern.test(line)) return true;
+  }
+
+  // Check if line is followed by a blank line and is relatively short (title-like)
+  const nextLine = idx + 1 < allLines.length ? allLines[idx + 1]?.trim() : '';
+  const prevLine = idx > 0 ? allLines[idx - 1]?.trim() : '';
+
+  // Short line preceded by blank line and followed by content
+  if (line.length < 60 && !prevLine && nextLine && !line.includes('|') && !/\d{3}/.test(line)) {
+    // Check if it looks title-case or bolded (no lowercase start, no punctuation end)
+    if (!line.match(/[.!?,;:]$/) && /^[A-Z]/.test(line)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Map a document section header + content to a care guide category.
+ */
+function categorizeDocumentSection(header, content) {
+  const h = header.toLowerCase();
+  const c = content.toLowerCase();
+  const combined = h + ' ' + c.substring(0, 300);
+
+  // Check header first (most reliable signal)
+  const headerMap = [
+    { pattern: /contact|phone|emergency|pediatrician|poison|911/, category: 'emergencyContacts' },
+    { pattern: /meal|snack|food|breakfast|lunch|dinner|eat/, category: 'meals' },
+    { pattern: /nap|bedtime|sleep|bed time|night waking|quiet time|comfort item/, category: 'napsBedtime' },
+    { pattern: /diaper|potty|toilet|bathroom|wipe/, category: 'diapersPotty' },
+    { pattern: /safety|important.*read|watch out|car\s*&\s*car seat|car seat/, category: 'safetyTips' },
+    { pattern: /tv|music|entertainment|screen|streaming|show|movie/, category: 'tvEntertainment' },
+    { pattern: /car|travel|parking|garage|driving|stroller/, category: 'carTravel' },
+    { pattern: /activit|toy|play|outdoor|museum|pier|playground|aquarium/, category: 'activities' },
+    { pattern: /medical|medication|allerg|health|tylenol/, category: 'medicalInfo' },
+    { pattern: /location|apartment|home|address|building|amenit/, category: 'locations' },
+    { pattern: /school|daycare|drop.off|pickup|mount carmel|l&l/, category: 'locations' },
+    { pattern: /schedul|monday|tuesday|wednesday|thursday|friday|saturday|sunday|checklist/, category: 'dailySchedule' },
+  ];
+
+  for (const { pattern, category } of headerMap) {
+    if (pattern.test(h)) return category;
+  }
+
+  // Fall back to content analysis
+  for (const { pattern, category } of headerMap) {
+    if (pattern.test(combined)) return category;
+  }
+
+  return 'dailySchedule';
+}
+
+/**
+ * Extract individual items from a document section's content.
+ * Handles bullet points, numbered lists, and paragraphs.
+ */
+function extractDocumentItems(content) {
+  const items = [];
+  const lines = content.split('\n');
+  let currentParagraph = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      // Blank line = end of paragraph
+      if (currentParagraph.length > 0) {
+        items.push(currentParagraph.join(' '));
+        currentParagraph = [];
+      }
+      continue;
+    }
+
+    // Bullet point or numbered item - standalone item
+    if (/^[•\-\*]\s/.test(trimmed) || /^\d+[\.\)]\s/.test(trimmed)) {
+      if (currentParagraph.length > 0) {
+        items.push(currentParagraph.join(' '));
+        currentParagraph = [];
+      }
+      // Clean the bullet marker
+      const cleaned = trimmed.replace(/^[•\-\*]\s+/, '').replace(/^\d+[\.\)]\s+/, '');
+      items.push(cleaned);
+    }
+    // Sub-bullet (indented with special markers)
+    else if (/^[⁃]\s/.test(trimmed) || /^\(\d+\)\s/.test(trimmed)) {
+      const cleaned = trimmed.replace(/^[⁃]\s+/, '').replace(/^\(\d+\)\s+/, '');
+      // Append to previous item if exists
+      if (items.length > 0) {
+        items[items.length - 1] += ' - ' + cleaned;
+      } else {
+        items.push(cleaned);
+      }
+    }
+    // Regular line - accumulate into paragraph
+    else {
+      currentParagraph.push(trimmed);
+    }
+  }
+
+  // Don't forget the last paragraph
+  if (currentParagraph.length > 0) {
+    items.push(currentParagraph.join(' '));
+  }
+
+  // Split very long items (>250 chars) at sentence boundaries
+  const finalItems = [];
+  for (const item of items) {
+    if (item.length > 250) {
+      const sentences = item.match(/[^.!?]+[.!?]+/g) || [item];
+      // Group sentences into chunks of ~200 chars
+      let chunk = '';
+      for (const sentence of sentences) {
+        if (chunk.length + sentence.length > 200 && chunk.length > 0) {
+          finalItems.push(chunk.trim());
+          chunk = sentence;
+        } else {
+          chunk += sentence;
+        }
+      }
+      if (chunk.trim()) finalItems.push(chunk.trim());
+    } else {
+      finalItems.push(item);
+    }
+  }
+
+  return finalItems.filter(item => item.length > 5);
+}
+
+/**
+ * Clean document text without aggressively rewriting it
+ * (unlike dictation, documents are already well-written)
+ */
+function cleanDocumentText(text) {
+  let cleaned = text.trim();
+
+  // Remove excess whitespace
+  cleaned = cleaned.replace(/\s{2,}/g, ' ');
+
+  // Capitalize first letter
+  if (cleaned.length > 0) {
+    cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+
+  // Remove trailing whitespace, ensure ends with punctuation if needed
+  cleaned = cleaned.trim();
+  if (cleaned.length > 0 && !cleaned.match(/[.!?:)]$/)) {
+    cleaned += '.';
+  }
+
+  return cleaned;
+}
+
+// ==========================================================================
+// DICTATION PROCESSING (for speech-to-text)
+// ==========================================================================
+
+/**
+ * Process spoken dictation using topic-boundary detection.
+ */
+function processDictationLocally(transcript, childName) {
   // Step 1: Split into topic-based segments using boundary detection
   const segments = splitByTopicBoundary(transcript);
   console.log('[CribNotes] Topic segments:', segments);
@@ -74,7 +356,7 @@ function processLocally(transcript, childName) {
 }
 
 // ==========================================================================
-// TOPIC KEYWORDS - used for both categorization and boundary detection
+// TOPIC KEYWORDS - used for dictation categorization and boundary detection
 // ==========================================================================
 
 const TOPIC_KEYWORDS = {
@@ -137,7 +419,6 @@ const TOPIC_KEYWORDS = {
 const WORD_TO_TOPIC = {};
 for (const [topic, words] of Object.entries(TOPIC_KEYWORDS)) {
   for (const word of words) {
-    // For multi-word phrases, index by the last word (most specific)
     const key = word.toLowerCase();
     if (!WORD_TO_TOPIC[key]) WORD_TO_TOPIC[key] = [];
     WORD_TO_TOPIC[key].push(topic);
@@ -146,21 +427,17 @@ for (const [topic, words] of Object.entries(TOPIC_KEYWORDS)) {
 
 /**
  * Split text by detecting topic boundaries using a sliding window.
- * Scans word-by-word and splits when the dominant topic changes.
  */
 function splitByTopicBoundary(text) {
-  // First do basic sentence splitting on punctuation
   const sentences = text
     .replace(/([.!?])\s*/g, '$1|||')
     .split('|||')
     .map(s => s.trim())
     .filter(s => s.length > 0);
 
-  // For each sentence, try topic-boundary splitting if it's long enough
   const allSegments = [];
   for (const sentence of sentences) {
     if (sentence.split(/\s+/).length > 12) {
-      // Long enough to potentially contain multiple topics
       const subSegments = detectTopicShifts(sentence);
       allSegments.push(...subSegments);
     } else if (sentence.length > 5) {
@@ -168,8 +445,6 @@ function splitByTopicBoundary(text) {
     }
   }
 
-  // If the whole transcript had no punctuation, we got one big sentence
-  // Try topic splitting on the whole thing
   if (sentences.length <= 1 && text.split(/\s+/).length > 12) {
     return detectTopicShifts(text);
   }
@@ -177,10 +452,6 @@ function splitByTopicBoundary(text) {
   return allSegments.length > 0 ? allSegments : [text.trim()];
 }
 
-/**
- * Detect topic shifts within a continuous string of text.
- * Returns an array of segments, each covering one topic.
- */
 function detectTopicShifts(text) {
   const words = text.split(/\s+/);
   if (words.length < 6) return [text];
@@ -198,12 +469,9 @@ function detectTopicShifts(text) {
       currentTopic = topic;
       lastTopicChangeAt = i;
     } else if (topic !== currentTopic) {
-      // Look ahead to confirm this is a real topic change (not just a stray keyword)
       const confirmed = confirmTopicChange(words, i, topic);
       if (confirmed && (i - lastTopicChangeAt) >= 3) {
-        // Find a good split point: look back for natural break words
         const splitIdx = findNaturalSplitPoint(words, i);
-
         const segment = words.slice(currentStart, splitIdx).join(' ').trim();
         if (segment.length > 10) {
           segments.push(segment);
@@ -215,7 +483,6 @@ function detectTopicShifts(text) {
     }
   }
 
-  // Add the last segment
   const lastSegment = words.slice(currentStart).join(' ').trim();
   if (lastSegment.length > 10) {
     segments.push(lastSegment);
@@ -224,26 +491,19 @@ function detectTopicShifts(text) {
   return segments.length > 0 ? segments : [text];
 }
 
-/**
- * Check if word at position matches a topic keyword.
- * Also checks 2-word and 3-word phrases.
- */
 function getWordTopic(words, idx) {
   const w = words[idx].toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  // Check 3-word phrases
   if (idx + 2 < words.length) {
     const phrase3 = [w, words[idx+1], words[idx+2]].join(' ').toLowerCase().replace(/[^a-z0-9\s]/g, '');
     if (WORD_TO_TOPIC[phrase3]) return WORD_TO_TOPIC[phrase3][0];
   }
 
-  // Check 2-word phrases
   if (idx + 1 < words.length) {
     const phrase2 = [w, words[idx+1]].join(' ').toLowerCase().replace(/[^a-z0-9\s]/g, '');
     if (WORD_TO_TOPIC[phrase2]) return WORD_TO_TOPIC[phrase2][0];
   }
 
-  // Check single word (skip very common words that appear in multiple topics)
   const skipWords = new Set(['his', 'her', 'the', 'a', 'an', 'is', 'at', 'to', 'and', 'or', 'for', 'in', 'on', 'it']);
   if (skipWords.has(w)) return null;
 
@@ -251,40 +511,26 @@ function getWordTopic(words, idx) {
   return null;
 }
 
-/**
- * Look ahead a few words to confirm a topic change is real,
- * not just a stray keyword.
- */
 function confirmTopicChange(words, startIdx, newTopic) {
   let matches = 0;
   const lookAhead = Math.min(8, words.length - startIdx);
-
   for (let i = startIdx; i < startIdx + lookAhead; i++) {
     const topic = getWordTopic(words, i);
     if (topic === newTopic) matches++;
   }
-
-  // At least 1 keyword match in the look-ahead confirms the shift
   return matches >= 1;
 }
 
-/**
- * Find a natural split point near the given index.
- * Looks back for pronouns, conjunctions, or possessives.
- */
 function findNaturalSplitPoint(words, idx) {
-  // Look back up to 3 words for a natural break
   const breakWords = /^(his|her|the|for|at|and|also|then|next|about|regarding|when|if)$/i;
   for (let i = idx; i >= Math.max(0, idx - 3); i--) {
-    if (breakWords.test(words[i])) {
-      return i;
-    }
+    if (breakWords.test(words[i])) return i;
   }
   return idx;
 }
 
 /**
- * Categorize text into the best guide section
+ * Categorize text into the best guide section (for dictation)
  */
 function getBestCategory(text) {
   const lowerText = text.toLowerCase();
@@ -318,9 +564,7 @@ function getBestCategory(text) {
     }
   }
 
-  // If no strong match, default to dailySchedule
   if (bestScore === 0) bestCategory = 'dailySchedule';
-
   return bestCategory;
 }
 
@@ -330,13 +574,11 @@ function getBestCategory(text) {
 function polishText(text, childName) {
   let cleaned = text.trim();
 
-  // Remove common speech artifacts
   cleaned = cleaned
     .replace(/\b(um|uh|like|you know|basically|so yeah|I mean)\b/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 
-  // Fix "p." or "p.m." artifacts from speech recognition (anywhere in text, not just end)
   cleaned = cleaned
     .replace(/(\d+:\d+)\s*p\.m?\s/gi, '$1 PM ')
     .replace(/(\d+:\d+)\s*a\.m?\s/gi, '$1 AM ')
@@ -347,7 +589,6 @@ function polishText(text, childName) {
     .replace(/(\d+)\s*p\.m?\.?\s*$/i, '$1 PM')
     .replace(/(\d+)\s*a\.m?\.?\s*$/i, '$1 AM');
 
-  // Convert "you" references to child's name or third person
   if (childName) {
     cleaned = cleaned
       .replace(/\byou go to\b/gi, `${childName} goes to`)
@@ -359,29 +600,23 @@ function polishText(text, childName) {
       .replace(/\byour\b/gi, `${childName}'s`);
   }
 
-  // Convert "he/she" at start to child name
   if (childName) {
     cleaned = cleaned
       .replace(/^he\b/i, childName)
       .replace(/^she\b/i, childName);
   }
 
-  // Remove leading conjunctions/filler
   cleaned = cleaned.replace(/^(and|but|so|or|also|then|next|plus)\s+/i, '');
 
-  // Capitalize first letter
   if (cleaned.length > 0) {
     cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
   }
 
-  // Ensure ends with punctuation
   if (cleaned.length > 0 && !cleaned.match(/[.!?]$/)) {
     cleaned += '.';
   }
 
-  // Clean up double spaces
   cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
-
   return cleaned;
 }
 
