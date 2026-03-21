@@ -891,7 +891,7 @@ async function viewChildGuide(childId) {
       document.querySelectorAll('.section-content').forEach(s => s.style.display = 'none');
 
       btn.classList.add('active');
-      document.querySelector(`[data-section="${btn.dataset.section}"]`).style.display = 'block';
+      document.querySelector(`.section-content[data-section="${btn.dataset.section}"]`).style.display = 'block';
     });
   });
 
