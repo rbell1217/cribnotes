@@ -1,0 +1,23 @@
+{
+  "name": "cribnotes",
+  "version": "1.0.0",
+  "description": "Babysitter Care Guide Platform",
+  "type": "module",
+  "author": "CribNotes Team",
+  "license": "MIT",
+  "scripts": {
+    "dev": "python3 -m http.server 3000",
+    "build": "echo 'No build required'",
+    "preview": "python3 -m http.server 3000"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/cribnotes.git"
+  },
+  "keywords": [
+    "babysitter",
+    "caregiving",
+    "firebase",
+    "mobile-app"
+  ]
+}
