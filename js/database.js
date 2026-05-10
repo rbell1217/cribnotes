@@ -104,13 +104,24 @@ export async function joinFamilyWithCode(inviteCode) {
  * Children Operations
  */
 
-export async function addChild(familyId, name, age, avatar = null) {
+export async function addChild(familyId, name, age, avatar = null, critical = {}) {
   try {
     const childRef = await db().collection('families').doc(familyId)
       .collection('children').add({
         name,
         age,
         avatar,
+        // Critical, always-on info pinned to the top of the guide.
+        // These fields are surfaced to sitters at all times regardless of context.
+        critical: {
+          allergies: critical.allergies || [],          // [{ allergen, severity, reaction, treatment }]
+          medications: critical.medications || [],       // [{ name, dose, schedule, notes }] -- summary; full schedule lives in /medications subcollection
+          insurance: critical.insurance || {},           // { provider, policyNumber, groupNumber, memberName, phone }
+          conditions: critical.conditions || [],         // [{ name, notes }]
+          bloodType: critical.bloodType || '',
+          pediatrician: critical.pediatrician || {},     // { name, phone, address }
+          emergencyContacts: critical.emergencyContacts || [] // [{ name, relationship, phone }]
+        },
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
 
@@ -296,6 +307,21 @@ export async function removeGuideItem(familyId, childId, sectionKey, item) {
   }
 }
 
+export async function clearCareGuide(familyId, childId) {
+  try {
+    const init = {};
+    GUIDE_SECTIONS.forEach(section => {
+      init[section] = [];
+    });
+    await db().collection('families').doc(familyId)
+      .collection('children').doc(childId)
+      .collection('careGuide').doc('sections').set(init);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 /**
  * Checklist Operations
  */
@@ -463,6 +489,117 @@ export async function deletePhoto(familyId, childId, photoId) {
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Critical Info Operations
+ * Critical info (allergies, current meds summary, insurance, blood type,
+ * pediatrician) is pinned permanently to the top of the guide and is
+ * NEVER context-filtered. Sitters always see this regardless of shift.
+ */
+
+export async function updateCriticalInfo(familyId, childId, criticalUpdates) {
+  try {
+    const updates = {};
+    Object.entries(criticalUpdates).forEach(([key, value]) => {
+      updates[`critical.${key}`] = value;
+    });
+    await db().collection('families').doc(familyId)
+      .collection('children').doc(childId).update(updates);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function getCriticalInfo(familyId, childId) {
+  try {
+    const doc = await db().collection('families').doc(familyId)
+      .collection('children').doc(childId).get();
+    if (!doc.exists) return { success: false, error: 'Child not found' };
+    const data = doc.data();
+    return { success: true, data: data.critical || {} };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Quick Status Updates
+ * One-tap statuses ("Down for nap", "Just ate", etc.) flow into the active
+ * shift's chronological log. This wrapper exists so callers don't need to
+ * import shift.js directly.
+ */
+export async function postQuickStatus(familyId, shiftId, status, extra = {}) {
+  try {
+    const user = getCurrentUser();
+    if (!shiftId) throw new Error('No active shift');
+    await db().collection('families').doc(familyId)
+      .collection('shifts').doc(shiftId)
+      .collection('log').add({
+        type: 'status',
+        text: status,
+        ...extra,
+        authorId: user?.uid || null,
+        authorName: user?.displayName || user?.email || 'Unknown',
+        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Sitter Permissions per family
+ * Parents can configure what each sitter is allowed to see/do.
+ */
+export async function setSitterPermissions(familyId, sitterId, permissions) {
+  try {
+    await db().collection('families').doc(familyId)
+      .collection('sitterPermissions').doc(sitterId).set(permissions, { merge: true });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function getSitterPermissions(familyId, sitterId) {
+  try {
+    const doc = await db().collection('families').doc(familyId)
+      .collection('sitterPermissions').doc(sitterId).get();
+    if (!doc.exists) {
+      // Default permissions: full read, can post log, cannot edit guide
+      return { success: true, data: {
+        canViewGuide: true,
+        canPostLog: true,
+        canEditGuide: false,
+        canViewPhotos: true,
+        canPostPhotos: true,
+        canFlagParents: true,
+        canViewMessages: true,
+        canViewMedications: true
+      }};
+    }
+    return { success: true, data: doc.data() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Enable Firestore offline persistence. Safe to call once during startup.
+ */
+export async function enableOfflinePersistence() {
+  try {
+    const fs = getFirestore();
+    if (!fs) return { success: false };
+    await fs.enablePersistence({ synchronizeTabs: true });
+    return { success: true };
+  } catch (error) {
+    // failed-precondition: multiple tabs; unimplemented: browser unsupported
+    return { success: false, error: error.code || error.message };
   }
 }
 

@@ -13,11 +13,15 @@ import {
 import {
   createFamily, getFamily, joinFamilyWithCode,
   addChild, getChildren, getChild, updateChild, deleteChild,
-  getCareGuide, updateGuideSection, addGuideItem, removeGuideItem,
+  getCareGuide, updateGuideSection, addGuideItem, removeGuideItem, clearCareGuide,
   createChecklist, getChecklists, updateChecklistItem, deleteChecklist,
   sendMessage, getMessages,
   addPhotoMetadata, getPhotos, deletePhoto,
-  searchGuide, getGuideSections, getSectionLabel
+  searchGuide, getGuideSections, getSectionLabel,
+  updateCriticalInfo, getCriticalInfo,
+  postQuickStatus,
+  setSitterPermissions, getSitterPermissions,
+  enableOfflinePersistence
 } from './database.js';
 
 import {
@@ -28,6 +32,28 @@ import {
 import { processTranscript } from './textProcessor.js';
 
 import { isFirebaseConfigured } from './config.js';
+
+import {
+  computeContext, filterGuideByContext, inferTagsFromText,
+  describeContext, ALL_TAG_GROUPS, DAY_TAGS, TIME_TAGS, SHIFT_TAGS, SPECIAL_TAGS,
+  tagBadgeColor
+} from './context.js';
+
+import {
+  startShift, endShift, getActiveShift, getShift, listShifts,
+  appendShiftLog, subscribeShiftLog, getShiftLog, summarizeShift,
+  subscribeFlagged, acknowledgeFlag, getShiftTypes
+} from './shift.js';
+
+import {
+  addMedication, listMedications, deactivateMedication,
+  recordDose, listDoses, getMedicationStatus
+} from './medication.js';
+
+import {
+  isPushSupported, requestNotificationPermission,
+  subscribeToPush, showLocalNotification
+} from './notifications.js';
 
 // ============================================================================
 // STATE MANAGEMENT
@@ -45,16 +71,34 @@ const state = {
   },
   dictationActive: false,
   searchResults: null,
-  messageUnsubscribe: null
+  messageUnsubscribe: null,
+
+  // Shift + context state
+  activeShift: null,           // shift document for the currently-running shift
+  contextTags: [],             // tag array driving guide filtering
+  contextOverride: false,      // sitter chose "Show all notes" to bypass filter
+  shiftLogUnsubscribe: null,
+  flaggedUnsubscribe: null,
+  pendingMedReminders: [],     // medication prompts due now
+  permissions: null            // sitter permissions for the active family
 };
 
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
 
+// Tear down the diagnostic boot screen as soon as the module has parsed.
+// If we got here, ES modules loaded successfully -- the rest of any failure
+// will be surfaced inside the app instead of by the boot diagnostic.
+function dismissBootScreen() {
+  const boot = document.getElementById('boot-screen');
+  if (boot) boot.remove();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   // Check if Firebase is configured
   if (!isFirebaseConfigured()) {
+    dismissBootScreen();
     renderSetupRequired();
     return;
   }
@@ -65,6 +109,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderSetupRequired();
     return;
   }
+
+  // Enable Firestore offline persistence for low-signal areas
+  enableOfflinePersistence().then(r => {
+    if (r.success) console.log('[CribNotes] Offline persistence enabled');
+    else console.log('[CribNotes] Offline persistence not enabled:', r.error);
+  });
 
   // Listen for auth state changes
   window.addEventListener('authStateChanged', async (e) => {
@@ -79,6 +129,13 @@ document.addEventListener('DOMContentLoaded', async () => {
           const familyResult = await getFamily(userData.familyId);
           if (familyResult.success) {
             state.currentFamily = familyResult.data;
+            // Load any active shift so context filtering kicks in immediately
+            await refreshActiveShift();
+            // Load sitter permissions if user is a sitter
+            if (userData.role === 'babysitter') {
+              const p = await getSitterPermissions(userData.familyId, user.uid);
+              if (p.success) state.permissions = p.data;
+            }
           } else {
             console.warn('Failed to load family:', familyResult.error);
             state.currentFamily = null;
@@ -91,12 +148,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.currentFamily = null;
       }
     } else {
+      cleanupSubscriptions();
       state.currentFamily = null;
+      state.activeShift = null;
+      state.contextTags = [];
     }
 
     // Route to appropriate screen
     await routeApp();
   });
+
+  // Periodically refresh medication status while a shift is running
+  setInterval(async () => {
+    if (state.activeShift && state.currentChild && state.currentFamily) {
+      await checkPendingMedications();
+    }
+  }, 60 * 1000);
 
   // Initial route
   await routeApp();
@@ -107,6 +174,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ============================================================================
 
 async function routeApp() {
+  dismissBootScreen();
   if (!state.currentUser) {
     // User not logged in
     state.currentScreen = 'auth-login';
@@ -157,12 +225,70 @@ async function routeApp() {
     // User fully set up with family
     if (state.userData.role === 'parent') {
       state.currentScreen = 'parent-dashboard';
+      // Subscribe to flagged-entry pushes so parents get instant alerts
+      subscribeFlaggedForParent();
       renderParentDashboard();
     } else {
-      state.currentScreen = 'sitter-dashboard';
-      renderSitterDashboard();
+      // Sitter: must start a shift before viewing context-filtered guides
+      if (!state.activeShift) {
+        state.currentScreen = 'sitter-shift-start';
+        renderShiftStartScreen();
+      } else {
+        state.currentScreen = 'sitter-dashboard';
+        renderSitterDashboard();
+      }
     }
   }
+}
+
+// ============================================================================
+// SUBSCRIPTIONS / CLEANUP
+// ============================================================================
+
+function cleanupSubscriptions() {
+  if (state.messageUnsubscribe) { state.messageUnsubscribe(); state.messageUnsubscribe = null; }
+  if (state.shiftLogUnsubscribe) { state.shiftLogUnsubscribe(); state.shiftLogUnsubscribe = null; }
+  if (state.flaggedUnsubscribe) { state.flaggedUnsubscribe(); state.flaggedUnsubscribe = null; }
+}
+
+async function refreshActiveShift() {
+  if (!state.currentFamily) return;
+  const result = await getActiveShift(state.currentFamily.id);
+  if (result.success && result.data) {
+    state.activeShift = result.data;
+    state.contextTags = result.data.contextTags || [];
+    // Re-compute live context (some tags update with the wall clock)
+    const start = result.data.startTime?.toDate?.() || new Date();
+    state.contextTags = computeContext(
+      new Date(),
+      result.data.shiftType,
+      undefined,
+      result.data.specials || []
+    );
+  } else {
+    state.activeShift = null;
+    state.contextTags = [];
+  }
+}
+
+function subscribeFlaggedForParent() {
+  if (!state.currentFamily || state.userData?.role !== 'parent') return;
+  if (state.flaggedUnsubscribe) state.flaggedUnsubscribe();
+  let lastCount = -1;
+  state.flaggedUnsubscribe = subscribeFlagged(state.currentFamily.id, (flagged) => {
+    const unack = flagged.filter(f => !f.acknowledged);
+    if (lastCount >= 0 && unack.length > lastCount) {
+      // New flagged entry came in
+      const latest = unack[0];
+      showLocalNotification(`Flagged by ${latest.authorName || 'sitter'}`, {
+        body: latest.text || 'New flagged moment',
+        tag: 'cribnotes-flag',
+        data: { type: 'flag', shiftId: latest.shiftId },
+        requireInteraction: true
+      });
+    }
+    lastCount = unack.length;
+  });
 }
 
 // ============================================================================
@@ -174,18 +300,36 @@ function renderSetupRequired() {
   root.innerHTML = `
     <div class="setup-container">
       <div class="setup-card">
-        <h1>CribNotes Setup Required</h1>
-        <p>Firebase is not yet configured. To get started:</p>
+        <h1>One-time Setup</h1>
+        <p style="color: var(--color-text-light); margin-bottom: 16px;">
+          CribNotes uses Firebase for auth, real-time sync, and storage.
+          Connect your project once and the app is fully operational.
+        </p>
+
+        <h3 style="color: var(--color-navy); margin-top: 16px;">Steps</h3>
         <ol>
-          <li>Go to <a href="https://console.firebase.google.com" target="_blank">Firebase Console</a></li>
-          <li>Create a new project or use existing</li>
-          <li>Enable Authentication (Email/Password and Google)</li>
-          <li>Create a Firestore database</li>
-          <li>Copy your project config from Project Settings</li>
-          <li>Update <code>js/config.js</code> with your credentials</li>
-          <li>Refresh this page</li>
+          <li>Open <a href="https://console.firebase.google.com" target="_blank" rel="noopener">Firebase Console</a> and create a project (free tier is fine).</li>
+          <li>Under <strong>Authentication</strong> &rarr; Sign-in method, enable <strong>Email/Password</strong> and <strong>Google</strong>.</li>
+          <li>Under <strong>Firestore Database</strong>, click Create Database (start in test mode).</li>
+          <li>Under <strong>Storage</strong>, click Get Started.</li>
+          <li>Open <strong>Project Settings</strong> &rarr; General &rarr; "Your apps" and add a Web app.</li>
+          <li>Copy the <code>firebaseConfig</code> object Firebase shows you.</li>
+          <li>Open <code>js/config.js</code> and replace the placeholder object with yours.</li>
+          <li>Refresh this page.</li>
         </ol>
-        <p>See README.md for detailed instructions.</p>
+
+        <h3 style="color: var(--color-navy); margin-top: 24px;">Need a quick local server?</h3>
+        <p style="color: var(--color-text-light); font-size: 0.95em;">
+          From a terminal in the <code>cribnotes-app</code> folder, run any of:
+        </p>
+        <pre style="background: #2C3E6B; color: #fff; padding: 12px; border-radius: 8px; font-size: 0.9em; overflow: auto;">python3 -m http.server 8000</pre>
+        <p style="color: var(--color-text-light); font-size: 0.95em;">
+          Then visit <a href="http://localhost:8000" target="_blank" rel="noopener">http://localhost:8000</a>.
+        </p>
+
+        <p style="margin-top: 16px; color: var(--color-text-light); font-size: 0.85em;">
+          See <code>README.md</code> for a more detailed walkthrough.
+        </p>
       </div>
     </div>
   `;
@@ -680,9 +824,22 @@ async function renderParentDashboard() {
 async function renderSitterDashboard() {
   const root = document.getElementById('app-root');
 
+  // Refresh active shift in case it ended elsewhere
+  await refreshActiveShift();
+  if (!state.activeShift) {
+    return renderShiftStartScreen();
+  }
+
   // Load children for the family
   const childrenResult = await getChildren(state.currentFamily.id);
   const children = childrenResult.success ? childrenResult.data : [];
+
+  // Load medication status across the family for the home banner
+  let dueCount = 0;
+  for (const c of children) {
+    const r = await getMedicationStatus(state.currentFamily.id, c.id);
+    if (r.success) dueCount += r.data.due.length;
+  }
 
   root.innerHTML = `
     <div class="app-layout">
@@ -696,21 +853,34 @@ async function renderSitterDashboard() {
         </div>
       </header>
 
+      ${renderContextBanner()}
+
       <main class="app-content">
         <div class="container">
           <div class="section-header">
-            <h2>Welcome, ${state.userData.name}!</h2>
-            <p>${state.currentFamily.name}</p>
+            <h2>Welcome, ${escapeHtml(state.userData.name)}!</h2>
+            <p>${escapeHtml(state.currentFamily.name)} &middot; Shift started ${formatTime(state.activeShift.startTime)}</p>
           </div>
 
+          ${dueCount > 0 ? `
+            <div class="med-due-banner">
+              <strong>${dueCount} medication${dueCount > 1 ? 's' : ''} due now</strong>
+              <button class="btn btn-small" id="meds-due-btn">Review</button>
+            </div>` : ''}
+
+          ${state.activeShift.startNote ? `
+            <div class="handoff-note">
+              <strong>Handoff note:</strong> ${escapeHtml(state.activeShift.startNote)}
+            </div>` : ''}
+
           <div class="quick-actions">
+            <button class="action-btn" id="log-btn">
+              <span class="icon">📍</span>
+              <span>Quick Log</span>
+            </button>
             <button class="action-btn" id="messages-btn">
               <span class="icon">💬</span>
               <span>Chat</span>
-            </button>
-            <button class="action-btn" id="emergency-btn">
-              <span class="icon">🚨</span>
-              <span>Emergency</span>
             </button>
           </div>
 
@@ -727,8 +897,8 @@ async function renderSitterDashboard() {
                 ${children.map(child => `
                   <div class="child-card" data-child-id="${child.id}">
                     <div class="child-avatar">${child.avatar || '👶'}</div>
-                    <h4>${child.name}</h4>
-                    <p>Age ${child.age}</p>
+                    <h4>${escapeHtml(child.name)}</h4>
+                    <p>Age ${escapeHtml(String(child.age))}</p>
                     <button class="btn btn-small btn-primary" onclick="viewChildGuide('${child.id}')">View Care Guide</button>
                   </div>
                 `).join('')}
@@ -738,38 +908,14 @@ async function renderSitterDashboard() {
         </div>
       </main>
 
-      <nav class="bottom-nav">
-        <button class="nav-item active" data-screen="home">
-          <span class="icon">🏠</span>
-          <span>Home</span>
-        </button>
-        <button class="nav-item" data-screen="guide">
-          <span class="icon">📖</span>
-          <span>Guide</span>
-        </button>
-        <button class="nav-item" data-screen="messages">
-          <span class="icon">💬</span>
-          <span>Messages</span>
-        </button>
-        <button class="nav-item" data-screen="lists">
-          <span class="icon">✓</span>
-          <span>Lists</span>
-        </button>
-        <button class="nav-item" data-screen="photos">
-          <span class="icon">📸</span>
-          <span>Photos</span>
-        </button>
-      </nav>
+      ${renderSitterBottomNav('home')}
     </div>
   `;
 
-  // Event listeners
-  document.getElementById('messages-btn')?.addEventListener('click', () => {
-    renderMessagesScreen();
-  });
-
-  document.getElementById('emergency-btn')?.addEventListener('click', () => {
-    renderEmergencyContacts();
+  document.getElementById('messages-btn')?.addEventListener('click', renderMessagesScreen);
+  document.getElementById('log-btn')?.addEventListener('click', renderShiftLogScreen);
+  document.getElementById('meds-due-btn')?.addEventListener('click', () => {
+    if (children.length) renderMedicationsScreen(children[0].id);
   });
 
   document.getElementById('search-input')?.addEventListener('input', async (e) => {
@@ -777,19 +923,11 @@ async function renderSitterDashboard() {
     await renderSearchResults(e.target.value);
   });
 
-  document.getElementById('menu-btn')?.addEventListener('click', () => {
-    renderSitterSettings();
-  });
+  document.getElementById('menu-btn')?.addEventListener('click', renderSitterSettings);
 
-  document.querySelectorAll('.nav-item').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const screen = btn.dataset.screen;
-      if (screen === 'home') renderSitterDashboard();
-      else if (screen === 'messages') renderMessagesScreen();
-      else if (screen === 'photos') renderPhotosScreen();
-    });
-  });
-
+  attachSitterBottomNavHandlers();
+  attachContextBannerHandlers();
+  mountEmergencyButton();
   hideLoading();
 }
 
@@ -808,7 +946,9 @@ async function viewChildGuide(childId) {
 
   const child = childResult.data;
   const guideResult = await getCareGuide(state.currentFamily.id, childId);
-  const guide = guideResult.success ? guideResult.data : {};
+  const rawGuide = guideResult.success ? guideResult.data : {};
+  // Apply the context filter for sitters (parents always see everything)
+  const guide = applyContextFilter(rawGuide);
 
   const isParent = state.userData.role === 'parent';
   const root = document.getElementById('app-root');
@@ -817,12 +957,16 @@ async function viewChildGuide(childId) {
     <div class="app-layout">
       <header class="app-header">
         <button class="btn-icon" id="back-btn">←</button>
-        <h1 class="header-title">${child.name}'s Guide</h1>
+        <h1 class="header-title">${escapeHtml(child.name)}'s Guide</h1>
         <button class="btn-icon" id="more-btn">⋯</button>
       </header>
 
+      ${renderContextBanner()}
+
       <main class="app-content">
         <div class="container">
+          ${renderCriticalInfoCard(child)}
+
           ${isParent ? `
           <div class="guide-action-buttons">
             <button id="dictate-guide-btn" class="dictate-banner-btn">
@@ -839,14 +983,48 @@ async function viewChildGuide(childId) {
                 <small>Import from PDF or Word doc</small>
               </span>
             </button>
+            <button id="critical-info-btn" class="dictate-banner-btn critical-banner-btn">
+              <span class="dictate-banner-icon">🛡️</span>
+              <span class="dictate-banner-text">
+                <strong>Edit Critical Info</strong>
+                <small>Allergies, meds, insurance &amp; pediatrician</small>
+              </span>
+            </button>
+            <button id="meds-btn" class="dictate-banner-btn meds-banner-btn">
+              <span class="dictate-banner-icon">💊</span>
+              <span class="dictate-banner-text">
+                <strong>Medication Schedule</strong>
+                <small>Add scheduled and as-needed meds</small>
+              </span>
+            </button>
           </div>
           <input type="file" id="doc-file-input" accept=".pdf,.docx,.doc,.txt" style="display: none;">
-          ` : ''}
+          ` : `
+          <div class="guide-action-buttons">
+            <button id="meds-btn" class="dictate-banner-btn meds-banner-btn">
+              <span class="dictate-banner-icon">💊</span>
+              <span class="dictate-banner-text">
+                <strong>Medications</strong>
+                <small>See schedule and record doses</small>
+              </span>
+            </button>
+            <button id="log-btn" class="dictate-banner-btn">
+              <span class="dictate-banner-icon">📍</span>
+              <span class="dictate-banner-text">
+                <strong>Shift Log</strong>
+                <small>Quick statuses, notes, flag moments</small>
+              </span>
+            </button>
+          </div>
+          `}
 
           <div class="tabs">
             ${getGuideSections().map(section => `
               <button class="tab-btn" data-section="${section}">
                 ${getSectionLabel(section)}
+                ${(rawGuide[section] || []).length !== (guide[section] || []).length
+                  ? `<span class="tab-filtered-count">${(guide[section] || []).length}/${(rawGuide[section] || []).length}</span>`
+                  : ''}
               </button>
             `).join('')}
           </div>
@@ -860,12 +1038,21 @@ async function viewChildGuide(childId) {
                 </div>
                 <div class="guide-items">
                   ${(guide[sectionKey] || []).length === 0 ? `
-                    <p class="text-muted">No information added yet</p>
+                    <p class="text-muted">${state.userData.role === 'babysitter' && !state.contextOverride && (rawGuide[sectionKey] || []).length > 0
+                      ? 'Nothing in this context. Tap "Show all" above to see all notes.'
+                      : 'No information added yet'}</p>
                   ` : `
-                    <ul>
-                      ${(guide[sectionKey] || []).map(item => `
-                        <li>${typeof item === 'string' ? item : item.text || item}</li>
-                      `).join('')}
+                    <ul class="guide-list">
+                      ${(guide[sectionKey] || []).map(item => {
+                        const text = typeof item === 'string' ? item : (item.text || '');
+                        const tags = (typeof item === 'object' && Array.isArray(item.tags)) ? item.tags : [];
+                        return `
+                          <li>
+                            <span class="guide-text">${escapeHtml(text)}</span>
+                            ${tags.length ? `<span class="tag-row">${tags.map(t => `<span class="tag-badge tag-${tagBadgeColor(t)}">${escapeHtml(t.replace(/-/g, ' '))}</span>`).join('')}</span>` : ''}
+                          </li>
+                        `;
+                      }).join('')}
                     </ul>
                   `}
                 </div>
@@ -936,6 +1123,19 @@ async function viewChildGuide(childId) {
   document.getElementById('more-btn')?.addEventListener('click', () => {
     renderChildMenu(childId);
   });
+
+  document.getElementById('critical-info-btn')?.addEventListener('click', () => {
+    renderEditCriticalInfoForm(childId, child.critical || {});
+  });
+
+  document.getElementById('meds-btn')?.addEventListener('click', () => {
+    renderMedicationsScreen(childId);
+  });
+
+  document.getElementById('log-btn')?.addEventListener('click', renderShiftLogScreen);
+
+  attachContextBannerHandlers();
+  mountEmergencyButton();
 }
 
 function renderChildMenu(childId) {
@@ -944,7 +1144,8 @@ function renderChildMenu(childId) {
     <h3>Options</h3>
     ${isParent ? `
       <button class="btn btn-full" onclick="renderEditChildForm('${childId}')">Edit Child</button>
-      <button class="btn btn-full" onclick="deleteChildConfirm('${childId}')">Delete Child</button>
+      <button class="btn btn-full" onclick="clearGuideConfirm('${childId}')" style="color: #e76f51;">Clear Care Guide</button>
+      <button class="btn btn-full" onclick="deleteChildConfirm('${childId}')" style="color: #c0392b;">Delete Child</button>
     ` : ''}
     <button class="btn btn-outline btn-full" onclick="closeModal()">Close</button>
   `);
@@ -965,17 +1166,65 @@ async function deleteChildConfirm(childId) {
   }
 }
 
+async function clearGuideConfirm(childId) {
+  closeModal();
+  showModal(`
+    <h3>Clear Care Guide</h3>
+    <p>This will remove all care guide entries for this child. This cannot be undone.</p>
+    <div style="display: flex; gap: 8px; margin-top: 20px;">
+      <button class="btn btn-primary" id="confirm-clear-guide-btn" style="flex: 1; background: #e76f51;">Clear Everything</button>
+      <button class="btn btn-outline" onclick="closeModal()" style="flex: 1;">Cancel</button>
+    </div>
+  `);
+  document.getElementById('confirm-clear-guide-btn')?.addEventListener('click', async () => {
+    closeModal();
+    showLoading();
+    try {
+      const result = await clearCareGuide(state.currentFamily.id, childId);
+      hideLoading();
+      if (result.success) {
+        showToast('Care guide cleared', 'success');
+        viewChildGuide(childId);
+      } else {
+        showToast('Failed to clear guide: ' + result.error, 'error');
+      }
+    } catch (err) {
+      hideLoading();
+      showToast('Error: ' + err.message, 'error');
+    }
+  });
+}
+
 async function editGuideSection(sectionKey) {
   const child = await getChild(state.currentFamily.id, state.currentChild);
   const guide = await getCareGuide(state.currentFamily.id, state.currentChild);
 
   const items = (guide.data ? guide.data[sectionKey] : []) || [];
-  const itemsText = items.map(item => typeof item === 'string' ? item : item.text).join('\n');
+  // Render each item on its own line. Append "[tag1, tag2]" so the parent
+  // can edit tags inline. Items without tags render as plain text.
+  const itemsText = items.map(item => {
+    if (typeof item === 'string') return item;
+    const tags = Array.isArray(item.tags) && item.tags.length
+      ? `  [${item.tags.join(', ')}]` : '';
+    return `${item.text || ''}${tags}`;
+  }).join('\n');
 
   showModal(`
-    <h3>Edit ${getSectionLabel(sectionKey)}</h3>
-    <textarea id="edit-items" rows="8" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">${itemsText}</textarea>
-    <p style="font-size: 0.9em; color: #666; margin-top: 8px;">One item per line</p>
+    <h3>Edit ${escapeHtml(getSectionLabel(sectionKey))}</h3>
+    <p style="font-size: 0.85em; color: var(--color-text-light); margin-bottom: 8px;">
+      One item per line. Add context tags in brackets at the end:<br>
+      <code>Bath at 7pm  [evening, bedtime, weekday]</code>
+    </p>
+    <textarea id="edit-items" rows="10" class="form-input">${escapeHtml(itemsText)}</textarea>
+    <details style="margin-top: 8px; font-size: 0.85em;">
+      <summary>Available tags</summary>
+      <div style="margin-top: 6px;">
+        <strong>Day:</strong> ${DAY_TAGS.join(', ')}<br>
+        <strong>Time:</strong> ${TIME_TAGS.join(', ')}<br>
+        <strong>Shift:</strong> ${SHIFT_TAGS.join(', ')}<br>
+        <strong>Special:</strong> ${SPECIAL_TAGS.join(', ')}
+      </div>
+    </details>
     <div style="display: flex; gap: 8px; margin-top: 16px;">
       <button class="btn btn-primary" onclick="saveGuideSection('${sectionKey}')">Save</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -985,7 +1234,16 @@ async function editGuideSection(sectionKey) {
 
 async function saveGuideSection(sectionKey) {
   const text = document.getElementById('edit-items')?.value || '';
-  const items = text.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+  const lines = text.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+
+  // Parse "text [tag1, tag2]" into { text, tags }; pure text becomes a string.
+  const items = lines.map(line => {
+    const m = line.match(/^(.*?)\s*\[([^\]]+)\]\s*$/);
+    if (!m) return line;
+    const itemText = m[1].trim();
+    const tags = m[2].split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    return { text: itemText, tags };
+  });
 
   showLoading();
   closeModal();
@@ -1195,9 +1453,13 @@ async function renderDictationScreen(childId) {
     for (const [section, items] of Object.entries(organizedItems)) {
       for (const item of items) {
         try {
-          console.log('[CribNotes] Saving item to section:', section, 'item:', item);
-          const result = await addGuideItem(state.currentFamily.id, childId, section, item);
-          console.log('[CribNotes] Save result:', JSON.stringify(result));
+          // Auto-attach inferred context tags from the item text. The parent
+          // can fine-tune later by editing the section.
+          const text = typeof item === 'string' ? item : item.text;
+          const tags = inferTagsFromText(text);
+          const tagged = tags.length ? { text, tags } : text;
+          console.log('[CribNotes] Saving item to section:', section, 'tags:', tags);
+          const result = await addGuideItem(state.currentFamily.id, childId, section, tagged);
           if (result.success) {
             savedCount++;
           } else {
@@ -1281,10 +1543,15 @@ async function handleDocumentUpload(file, childId, child) {
     }
 
     console.log('[CribNotes] Extracted text from upload:', extractedText.length, 'chars');
+
+    // Load all children in the family for multi-child distribution
+    const childrenResult = await getChildren(state.currentFamily.id);
+    const allChildren = childrenResult.success ? childrenResult.data : [];
+
     hideLoading();
 
     // Show the extracted text and let user review before organizing
-    renderUploadReview(extractedText, childId, child);
+    renderUploadReview(extractedText, childId, child, allChildren);
 
   } catch (error) {
     hideLoading();
@@ -1352,9 +1619,77 @@ async function extractTextFromDocx(file) {
   return result.value.trim();
 }
 
-function renderUploadReview(extractedText, childId, child) {
+/**
+ * Distribute organized items across multiple children.
+ * Items mentioning a specific child's name go only to that child.
+ * Items not mentioning any specific child are shared across all children.
+ */
+function distributeItemsAcrossChildren(organizedItems, allChildren) {
+  // Build name-to-child map: include nicknames and variations
+  const nameToChild = {};
+  for (const child of allChildren) {
+    const name = (child.name || '').trim();
+    if (!name) continue;
+    // Full name
+    nameToChild[name.toLowerCase()] = child.id;
+    // First name only
+    const firstName = name.split(/\s+/)[0];
+    if (firstName) nameToChild[firstName.toLowerCase()] = child.id;
+    // Common nickname: "Malakai" -> "Kai"
+    if (firstName.toLowerCase() === 'malakai') {
+      nameToChild['kai'] = child.id;
+    }
+  }
+
+  // Result: { childId: { section: [items] } }
+  const perChild = {};
+  for (const child of allChildren) {
+    perChild[child.id] = {};
+  }
+
+  for (const [section, items] of Object.entries(organizedItems)) {
+    for (const item of items) {
+      const itemLower = item.toLowerCase();
+
+      // Check which children are mentioned in this item
+      const mentionedChildIds = new Set();
+      for (const [nameLower, cid] of Object.entries(nameToChild)) {
+        // Use word boundary check to avoid partial matches
+        const regex = new RegExp(`\\b${nameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (regex.test(itemLower)) {
+          mentionedChildIds.add(cid);
+        }
+      }
+
+      if (mentionedChildIds.size === 0) {
+        // No specific child mentioned -- shared item, goes to all children
+        for (const child of allChildren) {
+          if (!perChild[child.id][section]) perChild[child.id][section] = [];
+          perChild[child.id][section].push(item);
+        }
+      } else {
+        // Only save to the mentioned child(ren)
+        for (const cid of mentionedChildIds) {
+          if (!perChild[cid][section]) perChild[cid][section] = [];
+          perChild[cid][section].push(item);
+        }
+      }
+    }
+  }
+
+  return perChild;
+}
+
+function renderUploadReview(extractedText, childId, child, allChildren) {
   const root = document.getElementById('app-root');
   const childName = child.data?.name || child.name || '';
+  const hasMultipleChildren = allChildren.length > 1;
+
+  // Build a display name map for children
+  const childNameMap = {};
+  for (const c of allChildren) {
+    childNameMap[c.id] = c.name || 'Child';
+  }
 
   // Truncate preview if very long
   const previewText = extractedText.length > 1500
@@ -1372,7 +1707,7 @@ function renderUploadReview(extractedText, childId, child) {
         <div class="container">
           <div class="dictation-card">
             <p style="text-align: center; color: #666; margin-bottom: 1rem;">
-              Extracted text from your document. Review and then organize into ${childName}'s care guide.
+              Extracted text from your document.${hasMultipleChildren ? ' Items will be distributed across your children automatically.' : ` Review and organize into ${childName}'s care guide.`}
             </p>
 
             <div id="extracted-text-display" class="transcript-display" style="max-height: 300px; overflow-y: auto; font-size: 0.9em; line-height: 1.5;">
@@ -1403,6 +1738,7 @@ function renderUploadReview(extractedText, childId, child) {
   `;
 
   let organizedItems = {};
+  let perChildDistribution = {};
 
   document.getElementById('back-btn')?.addEventListener('click', () => {
     viewChildGuide(childId);
@@ -1436,14 +1772,49 @@ function renderUploadReview(extractedText, childId, child) {
         return;
       }
 
-      resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
-        <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
-          <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
-          <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
-            ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #2a9d8f; line-height: 1.4;">${item}</li>`).join('')}
-          </ul>
-        </div>
-      `).join('');
+      // Distribute across children if multiple exist
+      if (hasMultipleChildren) {
+        perChildDistribution = distributeItemsAcrossChildren(organizedItems, allChildren);
+
+        // Render per-child breakdown
+        let html = '';
+        for (const c of allChildren) {
+          const childItems = perChildDistribution[c.id] || {};
+          const totalItems = Object.values(childItems).reduce((sum, arr) => sum + arr.length, 0);
+
+          html += `<div style="margin-bottom: 16px;">
+            <div style="background: #1a365d; color: white; padding: 8px 12px; border-radius: 8px 8px 0 0; font-weight: 600;">
+              ${childNameMap[c.id]} <span style="font-weight: 400; opacity: 0.8;">(${totalItems} items)</span>
+            </div>
+            <div style="background: #f8f9fa; border-radius: 0 0 8px 8px; padding: 12px;">`;
+
+          if (totalItems === 0) {
+            html += `<p style="color: #999; margin: 0;">No items specific to this child</p>`;
+          } else {
+            for (const [section, items] of Object.entries(childItems)) {
+              html += `<div style="margin-bottom: 8px;">
+                <strong style="color: #2a9d8f; font-size: 0.9em;">${getSectionLabel(section)}</strong>
+                <ul style="margin: 4px 0 0 16px; padding: 0; list-style: none;">
+                  ${items.map(item => `<li style="margin: 4px 0; color: #333; padding-left: 10px; border-left: 3px solid #2a9d8f; line-height: 1.4; font-size: 0.9em;">${item}</li>`).join('')}
+                </ul>
+              </div>`;
+            }
+          }
+
+          html += `</div></div>`;
+        }
+        resultsList.innerHTML = html;
+      } else {
+        // Single child -- show flat list like before
+        resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
+          <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+            <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
+            <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
+              ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #2a9d8f; line-height: 1.4;">${item}</li>`).join('')}
+            </ul>
+          </div>
+        `).join('');
+      }
     } catch (error) {
       console.error('[CribNotes] Upload processing error:', error);
       resultsList.innerHTML = `<p style="color: #e74c3c;">Error processing document: ${error.message}</p>`;
@@ -1464,27 +1835,51 @@ function renderUploadReview(extractedText, childId, child) {
     let savedCount = 0;
     let errorCount = 0;
 
-    const guideCheck = await getCareGuide(state.currentFamily.id, childId);
-    console.log('[CribNotes] Guide doc check for upload save:', guideCheck.success);
+    const tagItem = (raw) => {
+      const text = typeof raw === 'string' ? raw : (raw.text || '');
+      const tags = inferTagsFromText(text);
+      return tags.length ? { text, tags } : text;
+    };
 
-    for (const [section, items] of Object.entries(organizedItems)) {
-      for (const item of items) {
-        try {
-          const result = await addGuideItem(state.currentFamily.id, childId, section, item);
-          if (result.success) {
-            savedCount++;
-          } else {
+    if (hasMultipleChildren && Object.keys(perChildDistribution).length > 0) {
+      // Save distributed items to each child
+      for (const c of allChildren) {
+        const childItems = perChildDistribution[c.id] || {};
+        // Initialize guide doc if needed
+        await getCareGuide(state.currentFamily.id, c.id);
+
+        for (const [section, items] of Object.entries(childItems)) {
+          for (const item of items) {
+            try {
+              const result = await addGuideItem(state.currentFamily.id, c.id, section, tagItem(item));
+              if (result.success) savedCount++;
+              else errorCount++;
+            } catch (err) {
+              errorCount++;
+            }
+          }
+        }
+      }
+    } else {
+      // Single child save
+      await getCareGuide(state.currentFamily.id, childId);
+      for (const [section, items] of Object.entries(organizedItems)) {
+        for (const item of items) {
+          try {
+            const result = await addGuideItem(state.currentFamily.id, childId, section, tagItem(item));
+            if (result.success) savedCount++;
+            else errorCount++;
+          } catch (err) {
             errorCount++;
           }
-        } catch (err) {
-          errorCount++;
         }
       }
     }
 
     hideLoading();
     if (savedCount > 0) {
-      showToast(`Saved ${savedCount} items from document!`, 'success');
+      const childCount = hasMultipleChildren ? ` across ${allChildren.length} children` : '';
+      showToast(`Saved ${savedCount} items${childCount}!`, 'success');
       setTimeout(() => viewChildGuide(childId), 1500);
     } else {
       showToast('Failed to save items', 'error');
@@ -1899,16 +2294,155 @@ function renderParentSettings() {
     <hr style="margin: 16px 0;">
     <button class="btn btn-outline btn-full" onclick="copyInviteCode()">Copy Code</button>
     <button class="btn btn-full" onclick="renderProfileSettings()">Profile</button>
+    <button class="btn btn-full" onclick="renderSitterPermissionsScreen()">Sitter Permissions</button>
+    <button class="btn btn-full" onclick="renderShiftHistoryScreen()">Shift History</button>
     <button class="btn btn-outline btn-full" onclick="handleLogout()">Sign Out</button>
   `);
+}
+
+async function renderSitterPermissionsScreen() {
+  closeModal();
+  showLoading();
+  const family = state.currentFamily;
+  const sitterIds = family.sitterIds || [];
+  // Load each sitter's user doc + permissions
+  const fs = getFirestore();
+  const sitters = [];
+  for (const sid of sitterIds) {
+    const u = await fs.collection('users').doc(sid).get();
+    if (!u.exists) continue;
+    const p = await getSitterPermissions(family.id, sid);
+    sitters.push({ id: sid, user: u.data(), permissions: p.success ? p.data : {} });
+  }
+  hideLoading();
+
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">←</button>
+        <h1 class="header-title">Sitter Permissions</h1>
+      </header>
+      <main class="app-content">
+        <div class="container">
+          ${sitters.length === 0 ? `
+            <div class="empty-state">
+              <div class="empty-icon">🧑‍💼</div>
+              <h3>No sitters yet</h3>
+              <p>Share your invite code so a sitter can join.</p>
+            </div>` : sitters.map(s => `
+            <div class="card permission-card" data-sitter-id="${s.id}">
+              <h3>${escapeHtml(s.user.name || s.user.email)}</h3>
+              <p style="color: var(--color-text-light); font-size: 0.9em;">${escapeHtml(s.user.email || '')}</p>
+              ${[
+                ['canViewGuide', 'View care guide'],
+                ['canEditGuide', 'Edit care guide'],
+                ['canPostLog', 'Post shift log entries'],
+                ['canViewPhotos', 'View photos'],
+                ['canPostPhotos', 'Post photos'],
+                ['canFlagParents', 'Flag moments to parent'],
+                ['canViewMessages', 'See chat'],
+                ['canViewMedications', 'View medications &amp; record doses']
+              ].map(([key, label]) => `
+                <label class="perm-row">
+                  <input type="checkbox" data-key="${key}" ${s.permissions[key] !== false ? 'checked' : ''}>
+                  <span>${label}</span>
+                </label>
+              `).join('')}
+              <button class="btn btn-primary save-perm-btn" data-sitter-id="${s.id}">Save</button>
+            </div>
+          `).join('')}
+        </div>
+      </main>
+    </div>
+  `;
+
+  document.getElementById('back-btn').addEventListener('click', renderParentDashboard);
+  document.querySelectorAll('.save-perm-btn').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      const sid = btn.dataset.sitterId;
+      const card = document.querySelector(`.permission-card[data-sitter-id="${sid}"]`);
+      const updates = {};
+      card.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        updates[cb.dataset.key] = cb.checked;
+      });
+      showLoading();
+      const r = await setSitterPermissions(family.id, sid, updates);
+      hideLoading();
+      if (r.success) showToast('Permissions saved', 'success');
+      else showToast(r.error, 'error');
+    }));
+}
+
+async function renderShiftHistoryScreen() {
+  closeModal();
+  showLoading();
+  const result = await listShifts(state.currentFamily.id, 50);
+  hideLoading();
+  const shifts = result.success ? result.data : [];
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">←</button>
+        <h1 class="header-title">Shift History</h1>
+      </header>
+      <main class="app-content">
+        <div class="container">
+          ${shifts.length === 0 ? '<p class="text-muted">No shifts logged yet.</p>' : shifts.map(s => `
+            <div class="card shift-history-card">
+              <div class="shift-row-head">
+                <strong>${escapeHtml(s.sitterName || 'Sitter')}</strong>
+                <span class="shift-type-pill">${escapeHtml(s.shiftType || 'shift')}</span>
+              </div>
+              <p>
+                ${s.startTime?.toDate ? s.startTime.toDate().toLocaleString() : ''}
+                ${s.endTime?.toDate ? ' &mdash; ' + s.endTime.toDate().toLocaleString() : (s.active ? ' &mdash; <em>Active</em>' : '')}
+              </p>
+              ${s.summary ? `
+                <div class="shift-history-summary">
+                  ⏱ ${escapeHtml(s.summary.hoursLabel || '')} &middot;
+                  💤 ${s.summary.counts?.nap || 0} naps &middot;
+                  🍽 ${s.summary.counts?.meal || 0} meals &middot;
+                  👶 ${s.summary.counts?.diaper || 0} diapers &middot;
+                  💊 ${s.summary.counts?.medication || 0} meds
+                  ${s.summary.flaggedCount ? ` &middot; <span class="flagged-text">🚩 ${s.summary.flaggedCount} flagged</span>` : ''}
+                </div>
+                ${s.endNote ? `<p class="shift-end-note">"${escapeHtml(s.endNote)}"</p>` : ''}
+              ` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </main>
+    </div>
+  `;
+  document.getElementById('back-btn').addEventListener('click', renderParentDashboard);
 }
 
 function renderSitterSettings() {
   showModal(`
     <h3>Settings</h3>
+    ${state.activeShift ? `
+      <p style="font-size: 0.9em; color: var(--color-text-light); margin-bottom: 8px;">
+        Shift started ${formatTime(state.activeShift.startTime)}
+      </p>
+      <button class="btn btn-full" onclick="endShiftFlow()" style="background: var(--color-coral); color: white;">End Shift &amp; Generate Summary</button>
+    ` : ''}
     <button class="btn btn-full" onclick="renderProfileSettings()">Profile</button>
+    <button class="btn btn-full" onclick="enablePushFromSettings()">Enable Push Notifications</button>
     <button class="btn btn-outline btn-full" onclick="handleLogout()">Sign Out</button>
   `);
+}
+
+async function enablePushFromSettings() {
+  closeModal();
+  const r = await requestNotificationPermission();
+  if (r.success) {
+    await subscribeToPush();
+    showToast('Notifications enabled', 'success');
+  } else {
+    showToast(r.error || 'Notification permission not granted', 'error');
+  }
 }
 
 function renderProfileSettings() {
@@ -2148,6 +2682,1016 @@ function closeModal() {
   }
 }
 
+// ============================================================================
+// SHIFT START / END (sitter-facing)
+// ============================================================================
+
+/**
+ * The shift start screen is the first thing a sitter sees when they're not
+ * in an active shift. They pick the shift type, date/time (defaults to now),
+ * and any special contexts. Submitting this writes a shift to Firestore and
+ * the context engine kicks in.
+ */
+function renderShiftStartScreen() {
+  const root = document.getElementById('app-root');
+  const shiftTypes = getShiftTypes();
+  const now = new Date();
+  const isoNow = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+    .toISOString().slice(0, 16);
+
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <h1 class="header-title">Start Shift</h1>
+        <button class="btn-icon" id="logout-btn" title="Sign out">⎋</button>
+      </header>
+      <main class="app-content">
+        <div class="container container-small">
+          <div class="card">
+            <h2 style="color: var(--color-navy);">Welcome, ${escapeHtml(state.userData.name)}</h2>
+            <p style="color: var(--color-text-light);">${escapeHtml(state.currentFamily.name || 'Family')}</p>
+
+            <div style="background: var(--color-cream); border-radius: 8px; padding: 16px; margin: 16px 0;">
+              <p style="margin: 0; font-size: 0.95em;">
+                CribNotes will filter the care guide to show only notes relevant to
+                this shift's day, time, and length. You can always tap <strong>"Show all"</strong>
+                to see everything.
+              </p>
+            </div>
+
+            <form id="shift-start-form" class="form">
+              <div class="form-group">
+                <label for="shift-start-time">Shift starts</label>
+                <input type="datetime-local" id="shift-start-time" value="${isoNow}" required>
+              </div>
+
+              <div class="form-group">
+                <label>Shift type</label>
+                <div class="shift-type-grid">
+                  ${Object.entries(shiftTypes).map(([key, info], idx) => `
+                    <label class="shift-type-card">
+                      <input type="radio" name="shift-type" value="${key}" ${idx === 0 ? 'checked' : ''}>
+                      <div class="shift-type-content">
+                        <strong>${escapeHtml(info.label)}</strong>
+                        <small>${escapeHtml(info.description)}</small>
+                      </div>
+                    </label>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Special contexts (optional)</label>
+                <div class="tag-chip-row">
+                  ${SPECIAL_TAGS.map(t => `
+                    <label class="tag-chip">
+                      <input type="checkbox" name="special" value="${t}">
+                      <span>${escapeHtml(t.replace(/-/g, ' '))}</span>
+                    </label>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="shift-note">Handoff note (optional)</label>
+                <textarea id="shift-note" rows="3" placeholder="Anything the previous sitter or parent left for you?"></textarea>
+              </div>
+
+              <button type="submit" class="btn btn-primary btn-full">Start Shift</button>
+            </form>
+
+            <div class="divider"></div>
+            <button type="button" class="btn btn-outline btn-full" id="enable-push-btn">
+              Enable push notifications
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  `;
+
+  document.getElementById('shift-start-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const startTimeStr = document.getElementById('shift-start-time').value;
+    const shiftType = document.querySelector('input[name="shift-type"]:checked')?.value;
+    const specials = Array.from(document.querySelectorAll('input[name="special"]:checked'))
+      .map(el => el.value);
+    const note = document.getElementById('shift-note').value;
+
+    showLoading();
+    const result = await startShift(state.currentFamily.id, {
+      startTime: new Date(startTimeStr),
+      shiftType,
+      specials,
+      note
+    });
+    hideLoading();
+
+    if (!result.success) {
+      showToast(result.error || 'Could not start shift', 'error');
+      return;
+    }
+    showToast('Shift started', 'success');
+    await refreshActiveShift();
+    renderSitterDashboard();
+  });
+
+  document.getElementById('enable-push-btn').addEventListener('click', async () => {
+    const r = await requestNotificationPermission();
+    if (r.success) {
+      await subscribeToPush();
+      showToast('Notifications enabled', 'success');
+    } else {
+      showToast(r.error || 'Notification permission not granted', 'error');
+    }
+  });
+
+  document.getElementById('logout-btn').addEventListener('click', handleLogout);
+}
+
+/**
+ * End the running shift. Aggregates the log into a summary and shows it.
+ */
+async function endShiftFlow() {
+  if (!state.activeShift) {
+    showToast('No active shift', 'error');
+    return;
+  }
+  showModal(`
+    <h3>End Shift</h3>
+    <p style="color: var(--color-text-light); margin-bottom: 12px;">
+      Add a note for the parent or next sitter (optional):
+    </p>
+    <textarea id="end-shift-note" rows="4" style="width: 100%; padding: 8px; border: 1px solid var(--color-border); border-radius: 4px;" placeholder="How did it go?"></textarea>
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" id="confirm-end-shift-btn" style="flex: 1; background: var(--color-coral);">End & Generate Summary</button>
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+
+  document.getElementById('confirm-end-shift-btn').addEventListener('click', async () => {
+    const endNote = document.getElementById('end-shift-note').value;
+    closeModal();
+    showLoading();
+
+    // Pull the full log to build the summary
+    const logResult = await getShiftLog(state.currentFamily.id, state.activeShift.id);
+    const log = logResult.success ? logResult.data : [];
+    const shiftForSummary = { ...state.activeShift, endTime: new Date() };
+    const summary = summarizeShift(shiftForSummary, log);
+
+    const result = await endShift(state.currentFamily.id, state.activeShift.id, {
+      endNote,
+      summary: {
+        totalMinutes: summary.totalMinutes,
+        hoursLabel: summary.hoursLabel,
+        counts: summary.counts,
+        napMinutes: summary.napMinutes,
+        flaggedCount: summary.flagged.length,
+        endNote
+      }
+    });
+    hideLoading();
+
+    if (!result.success) {
+      showToast(result.error || 'Could not end shift', 'error');
+      return;
+    }
+
+    const endedShift = state.activeShift;
+    state.activeShift = null;
+    state.contextTags = [];
+    renderEndOfShiftSummary(endedShift, summary, log);
+  });
+}
+
+function renderEndOfShiftSummary(shift, summary, log) {
+  const root = document.getElementById('app-root');
+  const c = summary.counts;
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <h1 class="header-title">Shift Summary</h1>
+      </header>
+      <main class="app-content">
+        <div class="container container-small">
+          <div class="card summary-card">
+            <h2 style="color: var(--color-navy); margin-bottom: 4px;">${escapeHtml(shift.sitterName || 'Sitter')}</h2>
+            <p style="color: var(--color-text-light); margin-bottom: 16px;">
+              ${summary.startedAt.toLocaleString()} &mdash; ${summary.endedAt.toLocaleString()}
+            </p>
+
+            <div class="summary-stats">
+              <div class="summary-stat">
+                <div class="stat-num">${summary.hoursLabel}</div>
+                <div class="stat-label">Total time</div>
+              </div>
+              <div class="summary-stat">
+                <div class="stat-num">${c.nap || 0}</div>
+                <div class="stat-label">Naps (${summary.napMinutes}m)</div>
+              </div>
+              <div class="summary-stat">
+                <div class="stat-num">${c.meal || 0}</div>
+                <div class="stat-label">Meals</div>
+              </div>
+              <div class="summary-stat">
+                <div class="stat-num">${c.diaper || 0}</div>
+                <div class="stat-label">Diapers</div>
+              </div>
+              <div class="summary-stat">
+                <div class="stat-num">${c.medication || 0}</div>
+                <div class="stat-label">Meds</div>
+              </div>
+              <div class="summary-stat ${summary.flagged.length ? 'highlight' : ''}">
+                <div class="stat-num">${summary.flagged.length}</div>
+                <div class="stat-label">Flagged</div>
+              </div>
+            </div>
+
+            ${summary.flagged.length > 0 ? `
+              <div class="summary-section">
+                <h3>Flagged moments</h3>
+                ${summary.flagged.map(f => `
+                  <div class="flagged-row">
+                    <strong>${escapeHtml(f.authorName || 'Sitter')}</strong>
+                    <span>${escapeHtml(f.text || '')}</span>
+                    <small>${formatTime(f.timestamp)}</small>
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
+
+            <div class="summary-section">
+              <h3>Timeline</h3>
+              <div class="timeline">
+                ${(log || []).map(entry => `
+                  <div class="timeline-row">
+                    <span class="timeline-time">${formatTime(entry.timestamp)}</span>
+                    <span class="timeline-icon">${eventIcon(entry.type)}</span>
+                    <span class="timeline-text">${escapeHtml(entry.text || entry.type)}</span>
+                  </div>
+                `).join('') || '<p class="text-muted">No events logged.</p>'}
+              </div>
+            </div>
+
+            <div style="display: flex; gap: 8px; margin-top: 24px;">
+              <button class="btn btn-primary btn-full" id="finish-summary-btn">Done</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  `;
+  document.getElementById('finish-summary-btn').addEventListener('click', () => {
+    routeApp();
+  });
+}
+
+function eventIcon(type) {
+  switch (type) {
+    case 'meal': return '🍽️';
+    case 'nap': return '💤';
+    case 'diaper': return '👶';
+    case 'photo': return '📸';
+    case 'medication': return '💊';
+    case 'flag': return '🚩';
+    case 'status': return '📍';
+    default: return '📝';
+  }
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ============================================================================
+// CRITICAL INFO CARD (always-on, never context-filtered)
+// ============================================================================
+
+function renderCriticalInfoCard(child) {
+  const c = child.critical || {};
+  const allergies = Array.isArray(c.allergies) ? c.allergies : [];
+  const meds = Array.isArray(c.medications) ? c.medications : [];
+  const ec = Array.isArray(c.emergencyContacts) ? c.emergencyContacts : [];
+  const ins = c.insurance || {};
+  const ped = c.pediatrician || {};
+
+  const hasAny = allergies.length || meds.length || ec.length ||
+    ins.provider || ped.name || c.bloodType;
+  if (!hasAny) {
+    return `
+      <div class="critical-card empty">
+        <div class="critical-header">
+          <span class="critical-icon">🛡️</span>
+          <h3>Critical Info</h3>
+        </div>
+        <p style="color: var(--color-text-light); font-size: 0.9em; margin: 8px 0 0;">
+          No critical info added yet. Allergies, current medications, blood type,
+          and insurance live here so they're always one tap away.
+        </p>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="critical-card">
+      <div class="critical-header">
+        <span class="critical-icon">🛡️</span>
+        <h3>Critical Info</h3>
+      </div>
+
+      ${allergies.length ? `
+        <div class="critical-row">
+          <span class="critical-label">Allergies</span>
+          <ul class="critical-list">
+            ${allergies.map(a => `
+              <li>
+                <strong>${escapeHtml(a.allergen || a)}</strong>
+                ${a.severity ? `<span class="severity ${a.severity}">${escapeHtml(a.severity)}</span>` : ''}
+                ${a.reaction ? `<small>Reaction: ${escapeHtml(a.reaction)}</small>` : ''}
+                ${a.treatment ? `<small>Treatment: ${escapeHtml(a.treatment)}</small>` : ''}
+              </li>`).join('')}
+          </ul>
+        </div>` : ''}
+
+      ${meds.length ? `
+        <div class="critical-row">
+          <span class="critical-label">Current Meds</span>
+          <ul class="critical-list">
+            ${meds.map(m => `<li><strong>${escapeHtml(m.name || m)}</strong>${m.dose ? ` &mdash; ${escapeHtml(m.dose)}` : ''}${m.schedule ? ` <small>(${escapeHtml(m.schedule)})</small>` : ''}</li>`).join('')}
+          </ul>
+        </div>` : ''}
+
+      ${c.bloodType ? `
+        <div class="critical-row">
+          <span class="critical-label">Blood type</span>
+          <span>${escapeHtml(c.bloodType)}</span>
+        </div>` : ''}
+
+      ${ped.name ? `
+        <div class="critical-row">
+          <span class="critical-label">Pediatrician</span>
+          <span>${escapeHtml(ped.name)}${ped.phone ? ` &mdash; <a href="tel:${escapeHtml(ped.phone)}">${escapeHtml(ped.phone)}</a>` : ''}</span>
+        </div>` : ''}
+
+      ${ins.provider ? `
+        <div class="critical-row">
+          <span class="critical-label">Insurance</span>
+          <span>${escapeHtml(ins.provider)}${ins.policyNumber ? ` &middot; #${escapeHtml(ins.policyNumber)}` : ''}</span>
+        </div>` : ''}
+
+      ${ec.length ? `
+        <div class="critical-row">
+          <span class="critical-label">Emergency contacts</span>
+          <ul class="critical-list">
+            ${ec.map(p => `<li><strong>${escapeHtml(p.name)}</strong> ${p.relationship ? `(${escapeHtml(p.relationship)})` : ''} ${p.phone ? `<a href="tel:${escapeHtml(p.phone)}">${escapeHtml(p.phone)}</a>` : ''}</li>`).join('')}
+          </ul>
+        </div>` : ''}
+    </div>
+  `;
+}
+
+function renderEditCriticalInfoForm(childId, critical) {
+  const c = critical || {};
+  const allergiesText = (c.allergies || []).map(a =>
+    typeof a === 'string' ? a : [a.allergen, a.severity, a.reaction, a.treatment].filter(Boolean).join(' | ')
+  ).join('\n');
+  const medsText = (c.medications || []).map(m =>
+    typeof m === 'string' ? m : [m.name, m.dose, m.schedule, m.notes].filter(Boolean).join(' | ')
+  ).join('\n');
+  const ecText = (c.emergencyContacts || []).map(p =>
+    [p.name, p.relationship, p.phone].filter(Boolean).join(' | ')
+  ).join('\n');
+  const ins = c.insurance || {};
+  const ped = c.pediatrician || {};
+
+  showModal(`
+    <h3>Critical Info</h3>
+    <p style="color: var(--color-text-light); font-size: 0.9em; margin-bottom: 12px;">
+      One per line. Use " | " between fields.
+    </p>
+
+    <label class="form-label">Allergies <small>(allergen | severity | reaction | treatment)</small></label>
+    <textarea id="ci-allergies" rows="3" class="form-input">${escapeHtml(allergiesText)}</textarea>
+
+    <label class="form-label">Current Medications <small>(name | dose | schedule | notes)</small></label>
+    <textarea id="ci-meds" rows="3" class="form-input">${escapeHtml(medsText)}</textarea>
+
+    <label class="form-label">Blood type</label>
+    <input id="ci-bloodtype" class="form-input" value="${escapeHtml(c.bloodType || '')}" placeholder="O+">
+
+    <label class="form-label">Pediatrician name / phone</label>
+    <input id="ci-ped-name" class="form-input" value="${escapeHtml(ped.name || '')}" placeholder="Dr. Smith">
+    <input id="ci-ped-phone" class="form-input" value="${escapeHtml(ped.phone || '')}" placeholder="Phone">
+
+    <label class="form-label">Insurance (provider | policy # | group #)</label>
+    <input id="ci-ins-provider" class="form-input" value="${escapeHtml(ins.provider || '')}" placeholder="Provider">
+    <input id="ci-ins-policy" class="form-input" value="${escapeHtml(ins.policyNumber || '')}" placeholder="Policy #">
+    <input id="ci-ins-group" class="form-input" value="${escapeHtml(ins.groupNumber || '')}" placeholder="Group #">
+
+    <label class="form-label">Emergency contacts <small>(name | relationship | phone)</small></label>
+    <textarea id="ci-ec" rows="3" class="form-input">${escapeHtml(ecText)}</textarea>
+
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" id="save-critical-btn" style="flex: 1;">Save</button>
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+
+  document.getElementById('save-critical-btn').addEventListener('click', async () => {
+    const parseLines = (text, fields) => text.split('\n')
+      .map(l => l.trim()).filter(Boolean)
+      .map(line => {
+        const parts = line.split('|').map(s => s.trim());
+        const obj = {};
+        fields.forEach((f, i) => { if (parts[i]) obj[f] = parts[i]; });
+        return obj;
+      });
+
+    const updates = {
+      allergies: parseLines(document.getElementById('ci-allergies').value,
+        ['allergen', 'severity', 'reaction', 'treatment']),
+      medications: parseLines(document.getElementById('ci-meds').value,
+        ['name', 'dose', 'schedule', 'notes']),
+      emergencyContacts: parseLines(document.getElementById('ci-ec').value,
+        ['name', 'relationship', 'phone']),
+      bloodType: document.getElementById('ci-bloodtype').value.trim(),
+      pediatrician: {
+        name: document.getElementById('ci-ped-name').value.trim(),
+        phone: document.getElementById('ci-ped-phone').value.trim()
+      },
+      insurance: {
+        provider: document.getElementById('ci-ins-provider').value.trim(),
+        policyNumber: document.getElementById('ci-ins-policy').value.trim(),
+        groupNumber: document.getElementById('ci-ins-group').value.trim()
+      }
+    };
+
+    showLoading();
+    closeModal();
+    const result = await updateCriticalInfo(state.currentFamily.id, childId, updates);
+    hideLoading();
+    if (!result.success) showToast(result.error, 'error');
+    else {
+      showToast('Critical info saved', 'success');
+      viewChildGuide(childId);
+    }
+  });
+}
+
+// ============================================================================
+// EMERGENCY MODE
+// ============================================================================
+
+/**
+ * Persistent floating Emergency button. Mounts into #emergency-portal so it's
+ * accessible from anywhere in the sitter view. Tap to open the quick-dial stack.
+ */
+function mountEmergencyButton() {
+  const portal = document.getElementById('emergency-portal');
+  if (!portal) return;
+  if (!state.activeShift && state.userData?.role !== 'parent') {
+    portal.innerHTML = '';
+    return;
+  }
+  if (state.userData?.role !== 'babysitter') {
+    portal.innerHTML = '';
+    return;
+  }
+  portal.innerHTML = `
+    <button id="emergency-fab" class="emergency-fab" aria-label="Emergency">
+      <span class="ef-icon">🚨</span>
+      <span class="ef-text">Emergency</span>
+    </button>
+  `;
+  document.getElementById('emergency-fab').addEventListener('click', renderEmergencyStack);
+}
+
+async function renderEmergencyStack() {
+  // Pull critical info for the current/first child
+  let child = null;
+  if (state.currentChild) {
+    const r = await getChild(state.currentFamily.id, state.currentChild);
+    if (r.success) child = r.data;
+  } else {
+    const r = await getChildren(state.currentFamily.id);
+    if (r.success && r.data.length) child = r.data[0];
+  }
+  const critical = child?.critical || {};
+  const family = state.currentFamily;
+
+  // Build quick-dial list: 911, Poison Control, parents on the family,
+  // emergency contacts on the child, then pediatrician
+  const dials = [];
+  dials.push({ label: 'Call 911', sub: 'Emergency Services', tel: '911', accent: 'red' });
+  dials.push({ label: 'Poison Control', sub: '1-800-222-1222', tel: '18002221222', accent: 'orange' });
+  // Parents (first parentId resolved in family doc; we render generically)
+  if (family?.parentIds?.length) {
+    dials.push({ label: 'Call Parent', sub: 'Family parent on file', tel: family.primaryParentPhone || '', accent: 'navy' });
+  }
+  (critical.emergencyContacts || []).forEach(p => {
+    if (!p?.phone) return;
+    dials.push({ label: p.name, sub: p.relationship || 'Emergency contact', tel: p.phone, accent: 'navy' });
+  });
+  if (critical.pediatrician?.phone) {
+    dials.push({
+      label: 'Pediatrician',
+      sub: critical.pediatrician.name || '',
+      tel: critical.pediatrician.phone,
+      accent: 'teal'
+    });
+  }
+
+  showModal(`
+    <div class="emergency-modal">
+      <h2 style="color: var(--color-coral); margin-bottom: 4px;">Emergency Mode</h2>
+      <p style="color: var(--color-text-light); font-size: 0.9em; margin-bottom: 16px;">
+        Tap to call. Critical medical info shown below.
+      </p>
+
+      <div class="emergency-dials">
+        ${dials.map(d => `
+          <a class="emergency-dial accent-${d.accent}" href="${d.tel ? `tel:${escapeHtml(d.tel.replace(/[^\d+]/g, ''))}` : '#'}">
+            <strong>${escapeHtml(d.label)}</strong>
+            <span>${escapeHtml(d.sub || '')}</span>
+            ${d.tel ? `<small>${escapeHtml(d.tel)}</small>` : ''}
+          </a>
+        `).join('')}
+      </div>
+
+      ${child ? `
+        <div class="emergency-medical">
+          <h4>Medical at-a-glance &mdash; ${escapeHtml(child.name)}</h4>
+          ${critical.bloodType ? `<p><strong>Blood type:</strong> ${escapeHtml(critical.bloodType)}</p>` : ''}
+          ${(critical.allergies || []).length ? `<p><strong>Allergies:</strong> ${(critical.allergies || []).map(a => escapeHtml(a.allergen || a)).join(', ')}</p>` : ''}
+          ${(critical.medications || []).length ? `<p><strong>Meds:</strong> ${(critical.medications || []).map(m => escapeHtml(m.name || m)).join(', ')}</p>` : ''}
+          ${(critical.conditions || []).length ? `<p><strong>Conditions:</strong> ${(critical.conditions || []).map(c => escapeHtml(c.name || c)).join(', ')}</p>` : ''}
+        </div>
+      ` : ''}
+
+      <button class="btn btn-outline btn-full" onclick="closeModal()">Close</button>
+    </div>
+  `);
+}
+
+// ============================================================================
+// CONTEXT BANNER + FILTER TOGGLE
+// ============================================================================
+
+function renderContextBanner() {
+  if (state.userData?.role !== 'babysitter' || !state.activeShift) return '';
+  const desc = describeContext(state.contextTags);
+  return `
+    <div class="context-banner">
+      <div class="cb-left">
+        <span class="cb-icon">🧭</span>
+        <div>
+          <strong>Filtered: ${escapeHtml(desc)}</strong>
+          <small>${state.contextOverride ? 'Showing all notes' : 'Only context-matching notes shown'}</small>
+        </div>
+      </div>
+      <button class="cb-toggle" id="cb-toggle-btn">${state.contextOverride ? 'Re-filter' : 'Show all'}</button>
+      <button class="cb-end" id="cb-end-btn">End shift</button>
+    </div>
+  `;
+}
+
+function attachContextBannerHandlers() {
+  document.getElementById('cb-toggle-btn')?.addEventListener('click', () => {
+    state.contextOverride = !state.contextOverride;
+    if (state.currentChild) viewChildGuide(state.currentChild);
+    else renderSitterDashboard();
+  });
+  document.getElementById('cb-end-btn')?.addEventListener('click', endShiftFlow);
+}
+
+// ============================================================================
+// QUICK STATUS + SHIFT LOG
+// ============================================================================
+
+const QUICK_STATUSES = [
+  { label: 'Down for nap', icon: '💤', subtype: 'nap', extra: { subtype: 'start' } },
+  { label: 'Awake from nap', icon: '😊', subtype: 'nap', extra: { subtype: 'end' } },
+  { label: 'Just ate', icon: '🍽️', subtype: 'meal' },
+  { label: 'Snack time', icon: '🍪', subtype: 'meal', extra: { snack: true } },
+  { label: 'Diaper change', icon: '👶', subtype: 'diaper' },
+  { label: 'Outside / playing', icon: '🌳', subtype: 'status' },
+  { label: 'Watching TV', icon: '📺', subtype: 'status' },
+  { label: 'In the bath', icon: '🛁', subtype: 'status' }
+];
+
+async function postQuickStatusFromUI(label, subtype, extra = {}) {
+  if (!state.activeShift) {
+    showToast('Start a shift first', 'error');
+    return;
+  }
+  const result = await appendShiftLog(state.currentFamily.id, state.activeShift.id, {
+    type: subtype || 'status',
+    text: label,
+    childId: state.currentChild || null,
+    ...extra
+  });
+  if (result.success) showToast('Logged', 'success');
+  else showToast(result.error || 'Could not log', 'error');
+}
+
+async function flagMomentFromUI(text) {
+  if (!state.activeShift) {
+    showToast('Start a shift first', 'error');
+    return;
+  }
+  const result = await appendShiftLog(state.currentFamily.id, state.activeShift.id, {
+    type: 'flag',
+    text,
+    flagged: true,
+    childId: state.currentChild || null
+  });
+  if (result.success) {
+    showToast('Flagged. Parent will be notified.', 'success');
+    // Try a local notification too (best-effort)
+    showLocalNotification('Flagged moment sent', { body: text, tag: 'cribnotes-flag' });
+  } else {
+    showToast(result.error || 'Could not flag', 'error');
+  }
+}
+
+async function renderShiftLogScreen() {
+  if (!state.activeShift) {
+    showToast('No active shift', 'error');
+    return;
+  }
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">←</button>
+        <h1 class="header-title">Shift Log</h1>
+      </header>
+      ${renderContextBanner()}
+      <main class="app-content">
+        <div class="container">
+          <div class="quick-status-grid">
+            ${QUICK_STATUSES.map((s, idx) => `
+              <button class="qs-card" data-idx="${idx}">
+                <span class="qs-icon">${s.icon}</span>
+                <span class="qs-label">${escapeHtml(s.label)}</span>
+              </button>
+            `).join('')}
+          </div>
+
+          <div class="log-input-row">
+            <input type="text" id="log-text" placeholder="Add a note to the log..." class="search-input">
+            <button class="btn btn-primary" id="log-post-btn">Log</button>
+            <button class="btn" id="log-flag-btn" style="background: var(--color-coral); color: white;">🚩 Flag</button>
+          </div>
+
+          <div id="log-feed" class="log-feed">
+            <p class="text-muted">Loading log...</p>
+          </div>
+        </div>
+      </main>
+      ${renderSitterBottomNav('log')}
+    </div>
+  `;
+
+  document.getElementById('back-btn').addEventListener('click', renderSitterDashboard);
+  attachContextBannerHandlers();
+
+  document.querySelectorAll('.qs-card').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const idx = parseInt(btn.dataset.idx, 10);
+      const s = QUICK_STATUSES[idx];
+      await postQuickStatusFromUI(s.label, s.subtype, s.extra || {});
+    });
+  });
+
+  document.getElementById('log-post-btn').addEventListener('click', async () => {
+    const text = document.getElementById('log-text').value.trim();
+    if (!text) return;
+    document.getElementById('log-text').value = '';
+    await postQuickStatusFromUI(text, 'note');
+  });
+
+  document.getElementById('log-flag-btn').addEventListener('click', async () => {
+    const text = document.getElementById('log-text').value.trim() || 'Flagged moment';
+    document.getElementById('log-text').value = '';
+    await flagMomentFromUI(text);
+  });
+
+  // Real-time subscribe
+  if (state.shiftLogUnsubscribe) state.shiftLogUnsubscribe();
+  state.shiftLogUnsubscribe = subscribeShiftLog(state.currentFamily.id, state.activeShift.id, (entries) => {
+    const feed = document.getElementById('log-feed');
+    if (!feed) return;
+    if (!entries.length) {
+      feed.innerHTML = '<p class="text-muted">No log entries yet. Use a quick status or type a note above.</p>';
+      return;
+    }
+    feed.innerHTML = entries.slice().reverse().map(e => `
+      <div class="log-entry ${e.flagged ? 'flagged' : ''}">
+        <span class="le-icon">${eventIcon(e.type)}</span>
+        <div class="le-body">
+          <strong>${escapeHtml(e.text || e.type)}</strong>
+          <small>${escapeHtml(e.authorName || '')} &middot; ${formatTime(e.timestamp)}</small>
+        </div>
+      </div>
+    `).join('');
+  });
+
+  mountEmergencyButton();
+}
+
+// ============================================================================
+// MEDICATIONS UI
+// ============================================================================
+
+async function renderMedicationsScreen(childId) {
+  state.currentChild = childId;
+  const childResult = await getChild(state.currentFamily.id, childId);
+  if (!childResult.success) {
+    showToast('Error loading child', 'error');
+    return;
+  }
+  const child = childResult.data;
+  const medsResult = await listMedications(state.currentFamily.id, childId);
+  const meds = medsResult.success ? medsResult.data : [];
+  const isParent = state.userData.role === 'parent';
+
+  const statusResult = await getMedicationStatus(state.currentFamily.id, childId);
+  const status = statusResult.success ? statusResult.data : { due: [], soon: [], administeredToday: [] };
+
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">←</button>
+        <h1 class="header-title">${escapeHtml(child.name)}'s Meds</h1>
+        ${isParent ? `<button class="btn-icon" id="add-med-btn">+</button>` : ''}
+      </header>
+      <main class="app-content">
+        <div class="container">
+          ${status.due.length ? `
+            <div class="med-due-banner">
+              <strong>${status.due.length} dose${status.due.length > 1 ? 's' : ''} due now</strong>
+            </div>` : ''}
+
+          ${meds.length === 0 ? `
+            <div class="empty-state">
+              <div class="empty-icon">💊</div>
+              <h3>No medications yet</h3>
+              ${isParent ? `<button class="btn btn-primary" id="add-med-empty-btn">Add Medication</button>` : ''}
+            </div>
+          ` : `
+            <div class="meds-list">
+              ${meds.map(m => {
+                const due = status.due.find(d => d.med.id === m.id);
+                const soon = status.soon.find(d => d.med.id === m.id);
+                const adminEntry = status.administeredToday.find(a => a.med.id === m.id);
+                const givenCount = adminEntry?.dosesToday?.length || 0;
+                return `
+                <div class="med-card ${due ? 'due' : (soon ? 'soon' : '')}">
+                  <div class="med-header">
+                    <h3>${escapeHtml(m.name)}</h3>
+                    ${due ? `<span class="med-badge due-badge">Due now</span>` :
+                       soon ? `<span class="med-badge soon-badge">Soon</span>` : ''}
+                  </div>
+                  <p class="med-dose">${escapeHtml(m.dose || 'Dose not set')} ${m.route ? `&middot; ${escapeHtml(m.route)}` : ''}</p>
+                  ${(m.scheduledTimes || []).length ? `
+                    <p class="med-schedule">Scheduled: ${m.scheduledTimes.map(t => escapeHtml(t)).join(', ')}</p>` : ''}
+                  ${m.notes ? `<p class="med-notes">${escapeHtml(m.notes)}</p>` : ''}
+                  <p class="med-given-today">Given today: <strong>${givenCount}</strong></p>
+                  <div class="med-actions">
+                    <button class="btn btn-primary med-give-btn" data-med-id="${m.id}">Record Dose</button>
+                    <button class="btn btn-outline med-history-btn" data-med-id="${m.id}">History</button>
+                    ${isParent ? `<button class="btn btn-outline med-remove-btn" data-med-id="${m.id}" style="color: var(--color-coral); border-color: var(--color-coral);">Remove</button>` : ''}
+                  </div>
+                </div>`;
+              }).join('')}
+            </div>
+          `}
+        </div>
+      </main>
+      ${state.userData.role === 'babysitter' && state.activeShift ? renderSitterBottomNav('meds') : ''}
+    </div>
+  `;
+
+  document.getElementById('back-btn').addEventListener('click', () => {
+    if (state.userData.role === 'parent') viewChildGuide(childId);
+    else renderSitterDashboard();
+  });
+  document.getElementById('add-med-btn')?.addEventListener('click', () => renderAddMedicationForm(childId));
+  document.getElementById('add-med-empty-btn')?.addEventListener('click', () => renderAddMedicationForm(childId));
+
+  document.querySelectorAll('.med-give-btn').forEach(btn =>
+    btn.addEventListener('click', () => recordDoseFromUI(childId, btn.dataset.medId)));
+  document.querySelectorAll('.med-history-btn').forEach(btn =>
+    btn.addEventListener('click', () => showMedHistory(childId, btn.dataset.medId)));
+  document.querySelectorAll('.med-remove-btn').forEach(btn =>
+    btn.addEventListener('click', () => removeMedicationConfirm(childId, btn.dataset.medId)));
+
+  mountEmergencyButton();
+}
+
+function renderAddMedicationForm(childId) {
+  showModal(`
+    <h3>Add Medication</h3>
+    <input id="med-name" class="form-input" placeholder="Name (e.g., Tylenol)">
+    <input id="med-dose" class="form-input" placeholder="Dose (e.g., 5 mL)">
+    <input id="med-route" class="form-input" placeholder="Route (oral, topical, etc.)">
+    <input id="med-times" class="form-input" placeholder="Scheduled times (e.g., 08:00, 14:00, 20:00)">
+    <input id="med-cooldown" class="form-input" type="number" min="0" step="0.5" placeholder="Cooldown hours (default 4)">
+    <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0;">
+      <input type="checkbox" id="med-asneeded">
+      <span>As-needed (PRN), no schedule</span>
+    </label>
+    <textarea id="med-notes" class="form-input" rows="2" placeholder="Notes for sitter"></textarea>
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" id="med-save-btn">Save</button>
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+  document.getElementById('med-save-btn').addEventListener('click', async () => {
+    const name = document.getElementById('med-name').value.trim();
+    if (!name) { showToast('Name required', 'error'); return; }
+    const dose = document.getElementById('med-dose').value.trim();
+    const route = document.getElementById('med-route').value.trim();
+    const timesText = document.getElementById('med-times').value.trim();
+    const scheduledTimes = timesText.split(',').map(t => t.trim()).filter(Boolean);
+    const cooldownHours = parseFloat(document.getElementById('med-cooldown').value) || 4;
+    const asNeeded = document.getElementById('med-asneeded').checked;
+    const notes = document.getElementById('med-notes').value.trim();
+
+    showLoading();
+    closeModal();
+    const result = await addMedication(state.currentFamily.id, childId, {
+      name, dose, route, scheduledTimes, cooldownHours, asNeeded, notes
+    });
+    hideLoading();
+    if (!result.success) showToast(result.error, 'error');
+    else { showToast('Medication added', 'success'); renderMedicationsScreen(childId); }
+  });
+}
+
+async function recordDoseFromUI(childId, medId, force = false) {
+  showLoading();
+  const result = await recordDose(state.currentFamily.id, childId, medId, { force });
+  hideLoading();
+
+  if (!result.success && result.warning === 'cooldown') {
+    showModal(`
+      <h3 style="color: var(--color-coral);">⚠️ Possible Double Dose</h3>
+      <p>${escapeHtml(result.error)}</p>
+      <p style="font-size: 0.9em; color: var(--color-text-light); margin-top: 12px;">
+        Only override if you're certain the previous dose was incorrectly logged or
+        the medication's schedule allows it.
+      </p>
+      <div style="display: flex; gap: 8px; margin-top: 16px;">
+        <button class="btn btn-primary" id="force-dose-btn" style="flex: 1; background: var(--color-coral);">Override &amp; Record</button>
+        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      </div>
+    `);
+    document.getElementById('force-dose-btn').addEventListener('click', async () => {
+      closeModal();
+      await recordDoseFromUI(childId, medId, true);
+    });
+    return;
+  }
+
+  if (!result.success) { showToast(result.error || 'Could not record dose', 'error'); return; }
+
+  // Log into shift if active
+  if (state.activeShift) {
+    await appendShiftLog(state.currentFamily.id, state.activeShift.id, {
+      type: 'medication',
+      text: `Recorded dose at ${new Date(result.givenAt).toLocaleTimeString()}`,
+      childId, medId, forced: force
+    });
+  }
+
+  showToast('Dose recorded', 'success');
+  renderMedicationsScreen(childId);
+}
+
+async function showMedHistory(childId, medId) {
+  showLoading();
+  const result = await listDoses(state.currentFamily.id, childId, medId, 20);
+  hideLoading();
+  const doses = result.success ? result.data : [];
+  showModal(`
+    <h3>Dose History</h3>
+    ${doses.length === 0 ? '<p class="text-muted">No doses recorded yet.</p>' : `
+      <ul class="dose-history">
+        ${doses.map(d => `
+          <li>
+            <strong>${new Date(d.givenAtMs).toLocaleString()}</strong>
+            <small>By ${escapeHtml(d.givenByName || 'Unknown')}${d.forced ? ' (override)' : ''}${d.note ? ` &middot; ${escapeHtml(d.note)}` : ''}</small>
+          </li>`).join('')}
+      </ul>
+    `}
+    <button class="btn btn-outline btn-full" onclick="closeModal()" style="margin-top: 12px;">Close</button>
+  `);
+}
+
+async function removeMedicationConfirm(childId, medId) {
+  if (!confirm('Remove this medication from the schedule? Dose history will be preserved.')) return;
+  showLoading();
+  const result = await deactivateMedication(state.currentFamily.id, childId, medId);
+  hideLoading();
+  if (!result.success) showToast(result.error, 'error');
+  else { showToast('Removed', 'success'); renderMedicationsScreen(childId); }
+}
+
+async function checkPendingMedications() {
+  if (!state.currentChild) return;
+  const result = await getMedicationStatus(state.currentFamily.id, state.currentChild);
+  if (!result.success) return;
+  const due = result.data.due || [];
+  if (!due.length) return;
+  // Surface the first due med with a one-time notification per session
+  due.forEach(d => {
+    const tag = `med-${d.med.id}-${d.scheduledTime}`;
+    if (state.pendingMedReminders.includes(tag)) return;
+    state.pendingMedReminders.push(tag);
+    showLocalNotification(`💊 ${d.med.name} is due`, {
+      body: `${d.med.dose || 'Dose'} scheduled at ${d.scheduledTime}`,
+      tag,
+      requireInteraction: true
+    });
+  });
+}
+
+// ============================================================================
+// SITTER BOTTOM NAV
+// ============================================================================
+
+function renderSitterBottomNav(active = 'home') {
+  return `
+    <nav class="bottom-nav">
+      <button class="nav-item ${active === 'home' ? 'active' : ''}" id="nav-home">
+        <span class="icon">🏠</span><span>Home</span>
+      </button>
+      <button class="nav-item ${active === 'guide' ? 'active' : ''}" id="nav-guide">
+        <span class="icon">📖</span><span>Guide</span>
+      </button>
+      <button class="nav-item ${active === 'log' ? 'active' : ''}" id="nav-log">
+        <span class="icon">📍</span><span>Log</span>
+      </button>
+      <button class="nav-item ${active === 'meds' ? 'active' : ''}" id="nav-meds">
+        <span class="icon">💊</span><span>Meds</span>
+      </button>
+      <button class="nav-item ${active === 'messages' ? 'active' : ''}" id="nav-messages">
+        <span class="icon">💬</span><span>Chat</span>
+      </button>
+    </nav>
+  `;
+}
+
+function attachSitterBottomNavHandlers() {
+  document.getElementById('nav-home')?.addEventListener('click', renderSitterDashboard);
+  document.getElementById('nav-guide')?.addEventListener('click', () => {
+    if (state.currentChild) viewChildGuide(state.currentChild);
+    else renderSitterDashboard();
+  });
+  document.getElementById('nav-log')?.addEventListener('click', renderShiftLogScreen);
+  document.getElementById('nav-meds')?.addEventListener('click', () => {
+    if (state.currentChild) renderMedicationsScreen(state.currentChild);
+    else showToast('Select a child first', 'info');
+  });
+  document.getElementById('nav-messages')?.addEventListener('click', renderMessagesScreen);
+}
+
+// ============================================================================
+// CONTEXT-AWARE GUIDE WRAPPER
+// (Filters guide items by the active shift's contextTags before rendering)
+// ============================================================================
+
+/**
+ * Returns the guide filtered by the current sitter context, OR the unfiltered
+ * guide for parents / when contextOverride is set.
+ */
+function applyContextFilter(guide) {
+  if (state.userData?.role !== 'babysitter') return guide;
+  if (state.contextOverride) return guide;
+  if (!state.contextTags?.length) return guide;
+  return filterGuideByContext(guide, state.contextTags);
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Make global functions available
 window.viewChildGuide = viewChildGuide;
 window.renderChildChecklists = renderChildChecklists;
@@ -2173,8 +3717,24 @@ window.renderProfileSettings = renderProfileSettings;
 window.renderAddChildForm = renderAddChildForm;
 window.renderEditChildForm = renderEditChildForm;
 window.deleteChildConfirm = deleteChildConfirm;
+window.clearGuideConfirm = clearGuideConfirm;
 window.saveChild = saveChild;
 window.closeModal = closeModal;
 window.showToast = showToast;
 window.getSectionLabel = getSectionLabel;
 window.selectCategory = null;
+
+// Shift / context / medication / emergency / settings
+window.endShiftFlow = endShiftFlow;
+window.renderShiftLogScreen = renderShiftLogScreen;
+window.renderMedicationsScreen = renderMedicationsScreen;
+window.renderEditCriticalInfoForm = renderEditCriticalInfoForm;
+window.renderSitterPermissionsScreen = renderSitterPermissionsScreen;
+window.renderShiftHistoryScreen = renderShiftHistoryScreen;
+window.enablePushFromSettings = enablePushFromSettings;
+window.recordDoseFromUI = recordDoseFromUI;
+window.removeMedicationConfirm = removeMedicationConfirm;
+window.showMedHistory = showMedHistory;
+window.flagMomentFromUI = flagMomentFromUI;
+window.postQuickStatusFromUI = postQuickStatusFromUI;
+window.renderEmergencyStack = renderEmergencyStack;

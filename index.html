@@ -2,9 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="CribNotes - Babysitter Care Guide Platform">
-    <title>CribNotes - Care Guide Platform</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="CribNotes - context-aware childcare guide for parents and babysitters">
+    <meta name="theme-color" content="#2C3E6B">
+    <title>CribNotes - Context-Aware Care Guide</title>
+
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-192.png">
     <link rel="stylesheet" href="css/styles.css">
 
     <!-- Firebase SDK v9 Compat (via CDN) -->
@@ -22,11 +26,112 @@
     </script>
     <!-- Mammoth.js for reading uploaded Word docs -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+
+    <style>
+      /* Pre-app diagnostic boot screen so the user never sees a white page */
+      #boot-screen {
+        position: fixed; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: #FFF8F0; padding: 24px; z-index: 999;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      }
+      #boot-screen .boot-card {
+        max-width: 520px; background: white; border-radius: 12px; padding: 28px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+      }
+      #boot-screen h1 { color: #2C3E6B; margin: 0 0 8px; }
+      #boot-screen p { color: #444; line-height: 1.5; margin: 8px 0; }
+      #boot-screen pre {
+        background: #2C3E6B; color: #fff; padding: 12px 14px; border-radius: 8px;
+        font-size: 0.9em; overflow: auto; margin: 12px 0;
+      }
+      #boot-screen .ok { color: #2A9D8F; font-weight: 600; }
+      #boot-screen .warn { color: #E76F51; font-weight: 600; }
+      #boot-screen ol { padding-left: 20px; }
+      #boot-screen li { margin: 4px 0; }
+    </style>
 </head>
 <body>
+    <!-- Diagnostic boot screen. The app removes this once it has booted. -->
+    <div id="boot-screen">
+      <div class="boot-card">
+        <h1>CribNotes</h1>
+        <p id="boot-status">Starting up...</p>
+        <div id="boot-detail"></div>
+      </div>
+    </div>
+
     <div id="app-root"></div>
 
-    <!-- Main App Script -->
+    <!-- Persistent Emergency button portal (rendered by app.js when sitter is logged in) -->
+    <div id="emergency-portal"></div>
+
+    <!-- Toast/modal portal -->
+    <div id="overlay-portal"></div>
+
+    <!-- Pre-app diagnostics: detects file:// loading and other show-stoppers
+         BEFORE attempting to load the ES module so the user always sees
+         something useful even if module imports fail. -->
+    <script>
+      (function bootDiagnose() {
+        var status = document.getElementById('boot-status');
+        var detail = document.getElementById('boot-detail');
+
+        function fail(msg, html) {
+          status.innerHTML = '<span class="warn">' + msg + '</span>';
+          if (html) detail.innerHTML = html;
+        }
+
+        // file:// breaks ES modules + service worker + most fetches.
+        if (location.protocol === 'file:') {
+          fail('CribNotes needs to be served from a local web server.',
+            '<p>You opened the file directly with a double-click. Browsers block ES modules and service workers loaded via <code>file://</code>.</p>' +
+            '<p>Open Terminal in the <code>cribnotes-app</code> folder and run one of:</p>' +
+            '<pre>python3 -m http.server 8000</pre>' +
+            '<pre>npx http-server -p 8000</pre>' +
+            '<p>Then visit <a href="http://localhost:8000">http://localhost:8000</a> in your browser.</p>');
+          return;
+        }
+
+        // Check that the firebase compat SDK actually loaded.
+        if (typeof firebase === 'undefined') {
+          fail('Firebase SDK did not load.',
+            '<p>Check that you have an internet connection. CribNotes loads Firebase from Google\'s CDN.</p>' +
+            '<p>Open browser DevTools (Cmd-Option-I) and check the Network tab for blocked requests.</p>');
+          return;
+        }
+
+        // After 6 seconds, if app.js never tore down the boot screen,
+        // something failed silently. Surface a hint.
+        setTimeout(function () {
+          if (document.getElementById('boot-screen')) {
+            var msg = 'App started but never finished initializing.';
+            var hint = '<p>Open DevTools Console (Cmd-Option-J) and look for an error.</p>' +
+              '<p>Common causes:</p>' +
+              '<ol>' +
+                '<li>Firebase not configured yet &mdash; edit <code>js/config.js</code> with your project credentials.</li>' +
+                '<li>An ES module import failed &mdash; the Console will show the exact file.</li>' +
+                '<li>The browser is too old (CribNotes needs Chrome 105+, Safari 15.4+, Firefox 121+).</li>' +
+              '</ol>';
+            status.innerHTML = '<span class="warn">' + msg + '</span>';
+            detail.innerHTML = hint;
+          }
+        }, 6000);
+      })();
+    </script>
+
+    <!-- Main App Script. The app removes #boot-screen once it has rendered. -->
     <script type="module" src="js/app.js"></script>
+
+    <!-- Service worker registration: enables offline mode + Web Push -->
+    <script>
+      if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('sw.js').catch(function (err) {
+            console.warn('[CribNotes] Service worker registration failed:', err);
+          });
+        });
+      }
+    </script>
 </body>
 </html>

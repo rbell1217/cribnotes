@@ -22,11 +22,11 @@ coverage/
 *.swo
 *~
 
-# Build
+# Build output
 dist/
-build/
 .vercel/
 .next/
+# (build/ directory holds our committed build scripts -- not output, do not ignore)
 
 # Logs
 logs/
@@ -47,3 +47,7 @@ Thumbs.db
 # Local development
 .env.example
 config.local.js
+
+# Generated Firebase config -- created by build/inject-config.js at deploy.
+# Local devs hand-create this file with their dev project's credentials.
+js/config.js

@@ -1,23 +1,28 @@
 {
   "name": "cribnotes",
   "version": "1.0.0",
-  "description": "Babysitter Care Guide Platform",
+  "description": "Context-aware childcare guide for parents and babysitters",
   "type": "module",
-  "author": "CribNotes Team",
+  "author": "CribNotes",
   "license": "MIT",
   "scripts": {
-    "dev": "python3 -m http.server 3000",
-    "build": "echo 'No build required'",
-    "preview": "python3 -m http.server 3000"
+    "dev": "python3 -m http.server 8765",
+    "preview": "python3 -m http.server 8765",
+    "build": "node build/inject-config.js",
+    "vercel-build": "node build/inject-config.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/cribnotes.git"
+    "url": "https://github.com/rbell1217/cribnotes.git"
   },
   "keywords": [
     "babysitter",
     "caregiving",
     "firebase",
-    "mobile-app"
+    "mobile-app",
+    "context-aware"
   ]
 }
