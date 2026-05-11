@@ -633,12 +633,50 @@ textarea { min-height: 100px; resize: vertical; }
 .guide-list li {
   padding: 12px 0;
   border-bottom: 1px solid var(--color-border);
-  font-size: 0.95rem;
+  font-size: 1rem;
   line-height: 1.5;
 }
 .guide-list li:last-child { border-bottom: none; }
 
 .guide-text { display: block; }
+
+/* Inline edit + delete affordances on each guide item (parent only) */
+.guide-item-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.guide-item-content {
+  flex: 1;
+  min-width: 0;
+}
+.guide-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.btn-item-action {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 0.95rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-item-action:hover, .btn-item-action:active {
+  background: var(--color-bone);
+  border-color: var(--color-ink);
+}
+.btn-item-delete:hover, .btn-item-delete:active {
+  background: #fdecec;
+  border-color: #c0392b;
+}
 
 .tag-row {
   display: inline-flex;

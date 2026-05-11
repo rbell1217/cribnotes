@@ -1643,13 +1643,23 @@ async function viewChildGuide(childId) {
                       : 'No information added yet'}</p>
                   ` : `
                     <ul class="guide-list">
-                      ${(guide[sectionKey] || []).map(item => {
+                      ${(guide[sectionKey] || []).map((item, idx) => {
                         const text = typeof item === 'string' ? item : (item.text || '');
                         const tags = (typeof item === 'object' && Array.isArray(item.tags)) ? item.tags : [];
                         return `
-                          <li>
-                            <span class="guide-text">${escapeHtml(text)}</span>
-                            ${tags.length ? `<span class="tag-row">${tags.map(t => `<span class="tag-badge tag-${tagBadgeColor(t)}">${escapeHtml(t.replace(/-/g, ' '))}</span>`).join('')}</span>` : ''}
+                          <li class="guide-list-item" data-section="${sectionKey}" data-idx="${idx}">
+                            <div class="guide-item-row">
+                              <div class="guide-item-content">
+                                <span class="guide-text">${renderGuideItemTextHtml(text)}</span>
+                                ${tags.length ? `<span class="tag-row">${tags.map(t => `<span class="tag-badge tag-${tagBadgeColor(t)}">${escapeHtml(t.replace(/-/g, ' '))}</span>`).join('')}</span>` : ''}
+                              </div>
+                              ${isParent ? `
+                                <div class="guide-item-actions">
+                                  <button type="button" class="btn-item-action" onclick="editGuideItem('${sectionKey}', ${idx})" aria-label="Edit">✏️</button>
+                                  <button type="button" class="btn-item-action btn-item-delete" onclick="deleteGuideItemConfirm('${sectionKey}', ${idx})" aria-label="Delete">🗑️</button>
+                                </div>
+                              ` : ''}
+                            </div>
                           </li>
                         `;
                       }).join('')}
@@ -1830,6 +1840,126 @@ async function editGuideSection(sectionKey) {
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
     </div>
   `);
+}
+
+/**
+ * Inline edit for a single guide item. Opens a small modal pre-filled
+ * with the item's text + tags; on save it does a full-section update
+ * so we never race against the dictation save path.
+ */
+async function editGuideItem(sectionKey, idx) {
+  const guide = await getCareGuide(state.currentFamily.id, state.currentChild);
+  const items = (guide.data && Array.isArray(guide.data[sectionKey])) ? guide.data[sectionKey].slice() : [];
+  if (idx < 0 || idx >= items.length) {
+    showToast('Item not found', 'error');
+    return;
+  }
+  const item = items[idx];
+  const text = typeof item === 'string' ? item : (item.text || '');
+  const tags = (typeof item === 'object' && Array.isArray(item.tags)) ? item.tags : [];
+
+  showModal(`
+    <h3>Edit item</h3>
+    <p style="font-size: 0.85em; color: var(--color-text-light); margin-bottom: 8px;">
+      Tip: format scannable facts as <code>Label: value</code> (e.g. <code>Bedtime: 8 PM</code>).
+    </p>
+    <label class="form-label" for="edit-item-text">Text</label>
+    <textarea id="edit-item-text" rows="3" class="form-input">${escapeHtml(text)}</textarea>
+    <label class="form-label" for="edit-item-tags" style="margin-top: 12px;">Context tags (comma-separated)</label>
+    <input id="edit-item-tags" class="form-input" value="${escapeHtml(tags.join(', '))}" placeholder="e.g. evening, bedtime">
+    <details style="margin-top: 8px; font-size: 0.85em;">
+      <summary>Available tags</summary>
+      <div style="margin-top: 6px;">
+        <strong>Day:</strong> ${DAY_TAGS.join(', ')}<br>
+        <strong>Time:</strong> ${TIME_TAGS.join(', ')}<br>
+        <strong>Shift:</strong> ${SHIFT_TAGS.join(', ')}<br>
+        <strong>Special:</strong> ${SPECIAL_TAGS.join(', ')}
+      </div>
+    </details>
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" onclick="saveGuideItemEdit('${sectionKey}', ${idx})">Save</button>
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+}
+
+async function saveGuideItemEdit(sectionKey, idx) {
+  const newText = (document.getElementById('edit-item-text')?.value || '').trim();
+  const tagInput = (document.getElementById('edit-item-tags')?.value || '').trim();
+  if (!newText) {
+    showToast('Text cannot be empty', 'error');
+    return;
+  }
+  const tags = tagInput
+    ? tagInput.split(',').map(t => t.trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  const guide = await getCareGuide(state.currentFamily.id, state.currentChild);
+  const items = (guide.data && Array.isArray(guide.data[sectionKey])) ? guide.data[sectionKey].slice() : [];
+  if (idx < 0 || idx >= items.length) {
+    showToast('Item not found', 'error');
+    return;
+  }
+  items[idx] = tags.length ? { text: newText, tags } : newText;
+
+  showLoading();
+  closeModal();
+  const result = await updateGuideSection(state.currentFamily.id, state.currentChild, sectionKey, items);
+  if (!result.success) {
+    showToast(result.error, 'error');
+    hideLoading();
+  } else {
+    showToast('Item updated', 'success');
+    viewChildGuide(state.currentChild);
+  }
+}
+
+/**
+ * Confirm and delete a single guide item by index. Full-section update
+ * keeps this consistent with the edit path.
+ */
+async function deleteGuideItemConfirm(sectionKey, idx) {
+  const guide = await getCareGuide(state.currentFamily.id, state.currentChild);
+  const items = (guide.data && Array.isArray(guide.data[sectionKey])) ? guide.data[sectionKey].slice() : [];
+  if (idx < 0 || idx >= items.length) {
+    showToast('Item not found', 'error');
+    return;
+  }
+  const item = items[idx];
+  const text = typeof item === 'string' ? item : (item.text || '');
+  const preview = text.length > 80 ? text.slice(0, 80) + '…' : text;
+
+  showModal(`
+    <h3>Delete item?</h3>
+    <p style="margin: 8px 0;">${escapeHtml(preview)}</p>
+    <p style="font-size: 0.85em; color: var(--color-text-light);">This removes the item from ${escapeHtml(getSectionLabel(sectionKey))}. Sitters won't see it on their next shift.</p>
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" style="background: #c0392b; border-color: #c0392b;" onclick="confirmDeleteGuideItem('${sectionKey}', ${idx})">Delete</button>
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+}
+
+async function confirmDeleteGuideItem(sectionKey, idx) {
+  const guide = await getCareGuide(state.currentFamily.id, state.currentChild);
+  const items = (guide.data && Array.isArray(guide.data[sectionKey])) ? guide.data[sectionKey].slice() : [];
+  if (idx < 0 || idx >= items.length) {
+    closeModal();
+    showToast('Item not found', 'error');
+    return;
+  }
+  items.splice(idx, 1);
+
+  showLoading();
+  closeModal();
+  const result = await updateGuideSection(state.currentFamily.id, state.currentChild, sectionKey, items);
+  if (!result.success) {
+    showToast(result.error, 'error');
+    hideLoading();
+  } else {
+    showToast('Item deleted', 'success');
+    viewChildGuide(state.currentChild);
+  }
 }
 
 async function saveGuideSection(sectionKey) {
@@ -4595,13 +4725,20 @@ function escapeHtml(value) {
  */
 function renderDictationItem(item) {
   const text = typeof item === 'string' ? item : (item && item.text) || '';
-  // Match "Label: value" — label is 1-40 chars without internal colons,
-  // value is everything after the FIRST colon.
-  const m = text.match(/^([^:]{1,40}):\s+(.+)$/s);
+  return `<li>${renderGuideItemTextHtml(text)}</li>`;
+}
+
+/**
+ * Returns HTML for a guide item's text. If the text is "Label: value"
+ * the label is wrapped in <span class="drc-label"> so it renders bold
+ * and uppercase. Otherwise the plain escaped text is returned.
+ */
+function renderGuideItemTextHtml(text) {
+  const m = (text || '').match(/^([^:]{1,40}):\s+(.+)$/s);
   if (m) {
-    return `<li><span class="drc-label">${escapeHtml(m[1])}</span>${escapeHtml(m[2])}</li>`;
+    return `<span class="drc-label">${escapeHtml(m[1])}</span>${escapeHtml(m[2])}`;
   }
-  return `<li>${escapeHtml(text)}</li>`;
+  return escapeHtml(text || '');
 }
 
 // Make global functions available
@@ -4617,6 +4754,10 @@ window.renderUploadPhotoForm = renderUploadPhotoForm;
 window.uploadPhoto = uploadPhoto;
 window.editGuideSection = editGuideSection;
 window.saveGuideSection = saveGuideSection;
+window.editGuideItem = editGuideItem;
+window.saveGuideItemEdit = saveGuideItemEdit;
+window.deleteGuideItemConfirm = deleteGuideItemConfirm;
+window.confirmDeleteGuideItem = confirmDeleteGuideItem;
 window.renderParentDashboard = renderParentDashboard;
 window.renderSitterDashboard = renderSitterDashboard;
 window.renderMessagesScreen = renderMessagesScreen;
