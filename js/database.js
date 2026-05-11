@@ -49,6 +49,143 @@ export async function getFamily(familyId) {
   }
 }
 
+/**
+ * Self-heal helper: discover which family a sitter actually belongs to.
+ *
+ * This exists because the sitter's user-profile doc can lose track of its
+ * familyId in a couple of ways:
+ *   1. A parent approves a join request via approveJoinRequest(). That code
+ *      adds the sitter to families/{id}.sitterIds AND tries to write
+ *      familyId onto users/{sitterId} — but under the recommended Firestore
+ *      rules, only the user themselves can write their own profile, so the
+ *      user-doc write silently fails. The family side is correct; the user
+ *      side is stale.
+ *   2. Network glitch during joinFamilyWithCode / acceptFamilyInvite so the
+ *      family write succeeds but the user-doc write doesn't.
+ *
+ * On sitter sign-in we call this; if it finds a family where the sitter is
+ * already in sitterIds, we treat that as the source of truth and let the
+ * caller persist familyId back onto the user's own doc (which they ARE
+ * allowed to write under default rules).
+ *
+ * Returns { success, familyId } or { success: false, error }.
+ */
+export async function findFamilyForSitter(uid) {
+  try {
+    if (!uid) throw new Error('No uid');
+    // Primary: any family that already lists this sitter in sitterIds
+    const snap = await db().collection('families')
+      .where('sitterIds', 'array-contains', uid).limit(1).get();
+    if (!snap.empty) {
+      return { success: true, familyId: snap.docs[0].id };
+    }
+    // Secondary: a previously-approved join request still pinned to this sitter
+    const approved = await db().collection('joinRequests')
+      .where('sitterId', '==', uid)
+      .where('status', '==', 'approved').limit(1).get();
+    if (!approved.empty) {
+      return { success: true, familyId: approved.docs[0].data().familyId };
+    }
+    return { success: false, error: 'No family found for this sitter' };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * List EVERY family the current user belongs to (as parent or sitter).
+ * Used by the onboarding/switch-role screen so a sitter can pick which
+ * family to drop into without re-entering an invite code each session.
+ * Returns [{ id, name, role, parentIds, sitterIds, ... }, ...]
+ */
+export async function listMyFamilies(uid) {
+  try {
+    const userId = uid || (getCurrentUser() && getCurrentUser().uid);
+    if (!userId) throw new Error('No user');
+    const [asParent, asSitter] = await Promise.all([
+      db().collection('families').where('parentIds', 'array-contains', userId).get(),
+      db().collection('families').where('sitterIds', 'array-contains', userId).get(),
+    ]);
+    const out = [];
+    const seen = new Set();
+    asParent.forEach(doc => {
+      if (seen.has(doc.id)) return;
+      seen.add(doc.id);
+      out.push({ id: doc.id, role: 'parent', ...doc.data() });
+    });
+    asSitter.forEach(doc => {
+      if (seen.has(doc.id)) return;
+      seen.add(doc.id);
+      out.push({ id: doc.id, role: 'babysitter', ...doc.data() });
+    });
+    return { success: true, data: out };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Set the current user's active family. Must be one they already belong to —
+ * caller is responsible for verifying. Used when a sitter picks a different
+ * family from the onboarding list.
+ */
+export async function setActiveFamily(familyId) {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('No user logged in');
+    await db().collection('users').doc(user.uid).update({ familyId });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Sitter (or parent) removes THEMSELVES from a family. Pulls their uid out
+ * of the family's parentIds/sitterIds and clears their active familyId if
+ * it was pointing here.
+ */
+export async function leaveFamily(familyId) {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('No user logged in');
+    const famRef = db().collection('families').doc(familyId);
+    // Remove from both arrays — we don't know which one they were in, and
+    // arrayRemove is a no-op when the value isn't present.
+    await famRef.update({
+      parentIds: firebase.firestore.FieldValue.arrayRemove(user.uid),
+      sitterIds: firebase.firestore.FieldValue.arrayRemove(user.uid),
+    });
+    // If this was the user's active family, clear it.
+    const userSnap = await db().collection('users').doc(user.uid).get();
+    if (userSnap.exists && userSnap.data().familyId === familyId) {
+      await db().collection('users').doc(user.uid).update({ familyId: null });
+    }
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Parent-only: remove a sitter from this family. Pulls their uid out of
+ * sitterIds. Does NOT touch the sitter's user doc (Firestore rules under the
+ * default policy block writing into another user's doc); the sitter's
+ * findFamilyForSitter() self-heal will discover they're no longer in any
+ * family on their next sign-in.
+ */
+export async function removeSitterFromFamily(familyId, sitterUid) {
+  try {
+    if (!sitterUid) throw new Error('No sitter id');
+    await db().collection('families').doc(familyId).update({
+      sitterIds: firebase.firestore.FieldValue.arrayRemove(sitterUid),
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 export async function updateFamily(familyId, updates) {
   try {
     await db().collection('families').doc(familyId).update(updates);
@@ -971,15 +1108,25 @@ export async function approveJoinRequest(requestId) {
     if (!reqDoc.exists) throw new Error('Request not found');
     const req = reqDoc.data();
 
-    // Add sitter to family
+    // Add sitter to family — this is the authoritative source of truth.
     await db().collection('families').doc(req.familyId).update({
       sitterIds: firebase.firestore.FieldValue.arrayUnion(req.sitterId)
     });
-    // Set the sitter's familyId
-    await db().collection('users').doc(req.sitterId).update({
-      familyId: req.familyId
-    });
-    // Mark request approved
+
+    // Best-effort: try to set the sitter's familyId on their user doc. Under
+    // the recommended Firestore rules a parent cannot write to a sitter's
+    // user doc, so this will often throw permission-denied. That's fine —
+    // findFamilyForSitter() in the sitter's auth flow will discover the
+    // family from sitterIds on next sign-in and backfill it then.
+    try {
+      await db().collection('users').doc(req.sitterId).update({
+        familyId: req.familyId
+      });
+    } catch (e) {
+      console.warn('Could not write familyId onto sitter user doc (expected under default rules); sitter will self-heal on next sign-in:', e.message);
+    }
+
+    // Mark request approved — sitter reads this on sign-in as a backup signal.
     await db().collection('joinRequests').doc(requestId).update({
       status: 'approved',
       resolvedAt: firebase.firestore.FieldValue.serverTimestamp()

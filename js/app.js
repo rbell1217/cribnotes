@@ -28,7 +28,9 @@ import {
   searchSittersByEmail, inviteSitterByEmail,
   listMyFamilyInvites, listFamilyInvitesSent,
   acceptFamilyInvite, declineFamilyInvite, cancelFamilyInvite,
-  uploadUserAvatar, uploadChildAvatar, removeUserAvatar, removeChildAvatar
+  uploadUserAvatar, uploadChildAvatar, removeUserAvatar, removeChildAvatar,
+  findFamilyForSitter,
+  listMyFamilies, setActiveFamily, leaveFamily, removeSitterFromFamily
 } from './database.js';
 
 import {
@@ -157,6 +159,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.userData = userData;
 
     if (user && userData) {
+      // Self-heal for babysitters: if the user-doc lost its familyId (because
+      // a parent-side approveJoinRequest couldn't write into the sitter's doc
+      // under default Firestore rules, or because a previous join completed
+      // partially), look the family up from the family-side records and
+      // backfill the sitter's own user doc. We only do this for babysitters;
+      // parents who land here without a familyId are genuinely in onboarding.
+      if (!userData.familyId && userData.role === 'babysitter') {
+        try {
+          const recovered = await findFamilyForSitter(user.uid);
+          if (recovered.success) {
+            userData.familyId = recovered.familyId;
+            state.userData = userData;
+            // Persist back to the sitter's user doc so we don't have to
+            // re-discover on every sign-in. The sitter is allowed to write
+            // their own user doc under the default rules.
+            await setUserFamilyId(user.uid, recovered.familyId);
+          }
+        } catch (err) {
+          console.error('Sitter family recovery failed:', err);
+        }
+      }
+
       // Load family data if user has one
       if (userData.familyId) {
         try {
@@ -654,6 +678,13 @@ async function renderOnboardingSplit() {
   let sitterInvites = [];
   let pendingRequests = [];
   let sentInvites = [];
+  let myFamilies = [];
+  // Always look up the user's existing memberships so we can show the
+  // "Your families" list AND know whether to show a Back button.
+  try {
+    const my = await listMyFamilies(state.currentUser.uid);
+    if (my.success) myFamilies = my.data;
+  } catch (e) {}
   if (role === 'babysitter' && !hasFamily) {
     const invs = await listMyFamilyInvites();
     sitterInvites = invs.success ? invs.data : [];
@@ -665,9 +696,15 @@ async function renderOnboardingSplit() {
     sentInvites = sent.success ? sent.data : [];
   }
 
+  // If the user got dropped into this screen but actually belongs to families,
+  // they shouldn't be trapped — show a Back button that takes them to the
+  // dashboard of their active (or first available) family.
+  const canGoBack = hasFamily || myFamilies.length > 0;
+
   root.innerHTML = `
     <div class="app-layout onboarding-layout">
       <header class="app-header onboarding-header">
+        ${canGoBack ? `<button class="btn-icon" id="onboarding-back" title="Back">←</button>` : '<span></span>'}
         <h1 class="header-title">CribNotes</h1>
         <button class="btn btn-outline btn-small" id="onboarding-signout">Sign out</button>
       </header>
@@ -706,6 +743,7 @@ async function renderOnboardingSplit() {
 
           <!-- RIGHT: dynamic next step. Updates based on the selected role. -->
           <section class="onboarding-right" id="onboarding-right">
+            ${renderMyFamiliesBlock(myFamilies)}
             ${renderOnboardingRight({ role, hasFamily, sitterInvites, pendingRequests, sentInvites })}
           </section>
 
@@ -715,6 +753,42 @@ async function renderOnboardingSplit() {
   `;
 
   attachOnboardingHandlers();
+}
+
+/**
+ * Render the "Your families" picker at the top of the right pane. Lists every
+ * family the current user is a member of so they can jump back into a prior
+ * family without re-entering invite codes.
+ */
+function renderMyFamiliesBlock(myFamilies) {
+  if (!Array.isArray(myFamilies) || myFamilies.length === 0) return '';
+  const activeFamilyId = state.currentFamily?.id || state.userData?.familyId;
+  return `
+    <div class="my-families">
+      <span class="eyebrow">Your families</span>
+      <h3 class="onboarding-heading" style="font-size: 1.4rem; margin: 4px 0 14px;">Jump back in</h3>
+      <div class="my-families-list">
+        ${myFamilies.map(f => {
+          const isActive = f.id === activeFamilyId;
+          const roleLabel = f.role === 'parent' ? 'Parent' : 'Sitter';
+          return `
+            <div class="my-family-row">
+              <div class="my-family-meta">
+                <strong>${escapeHtml(f.name || 'Family')}</strong>
+                <span class="inbox-role">${roleLabel}</span>
+                ${isActive ? '<span class="my-family-active">Active</span>' : ''}
+              </div>
+              <div class="my-family-actions">
+                ${isActive ? '' : `<button class="btn btn-small btn-primary my-family-open" data-fam-id="${f.id}">Open</button>`}
+                <button class="btn btn-small btn-outline my-family-leave" data-fam-id="${f.id}" data-fam-name="${escapeHtml(f.name || 'this family').replace(/"/g, '&quot;')}">Leave</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+      <div class="divider" style="margin: 18px 0;"></div>
+    </div>
+  `;
 }
 
 function renderOnboardingRight({ role, hasFamily, sitterInvites, pendingRequests, sentInvites }) {
@@ -873,6 +947,66 @@ function attachOnboardingHandlers() {
   // Sign out
   document.getElementById('onboarding-signout')?.addEventListener('click', async () => {
     await signOut();
+  });
+
+  // Back button — only present when the user already has at least one family.
+  // Goes back to the active family's dashboard (or jumps into the first
+  // available family if currentFamily is null).
+  document.getElementById('onboarding-back')?.addEventListener('click', async () => {
+    if (state.currentFamily) {
+      await routeApp();
+      return;
+    }
+    // No active family but the user has memberships — pick the first one and
+    // make it active.
+    const my = await listMyFamilies(state.currentUser.uid);
+    if (my.success && my.data.length > 0) {
+      const target = my.data[0];
+      await setActiveFamily(target.id);
+      state.userData.familyId = target.id;
+      state.userData.role = target.role;
+      await routeApp();
+    }
+  });
+
+  // Open a different family from the "Your families" list
+  document.querySelectorAll('.my-family-open').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const famId = btn.dataset.famId;
+      if (!famId) return;
+      showLoading();
+      const target = (await listMyFamilies(state.currentUser.uid)).data.find(f => f.id === famId);
+      const result = await setActiveFamily(famId);
+      hideLoading();
+      if (!result.success) { showToast(result.error, 'error'); return; }
+      state.userData.familyId = famId;
+      if (target) state.userData.role = target.role;
+      state.currentFamily = null; // will reload from auth state
+      showToast('Switched family', 'success');
+      // Force a full re-fetch of family + dashboards
+      location.reload();
+    });
+  });
+
+  // Leave a family
+  document.querySelectorAll('.my-family-leave').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const famId = btn.dataset.famId;
+      const famName = btn.dataset.famName || 'this family';
+      if (!famId) return;
+      if (!confirm(`Leave ${famName}? You'll need a new invite or invite code to rejoin.`)) return;
+      showLoading();
+      const result = await leaveFamily(famId);
+      hideLoading();
+      if (!result.success) { showToast(result.error, 'error'); return; }
+      showToast(`Left ${famName}`, 'success');
+      // If we left the active family, clear local state
+      if (state.currentFamily?.id === famId) {
+        state.currentFamily = null;
+        state.userData.familyId = null;
+      }
+      location.reload();
+    });
   });
 
   // Role tiles — pick a role
@@ -1499,6 +1633,12 @@ async function renderSitterDashboard() {
     if (r.success) dueCount += r.data.due.length;
   }
 
+  // NOTE: Sitter dashboard now mirrors the parent dashboard's structure so
+  // both roles share the same chrome (header, welcome card, quick actions,
+  // Your Children grid, bottom nav). Sitter-only overlays — context banner,
+  // handoff note, med-due reminder, shift tools — layer ON TOP of the
+  // shared layout so the sitter still has every shift feature without
+  // diverging from what the parent sees.
   root.innerHTML = `
     <div class="app-layout">
       <header class="app-header">
@@ -1532,13 +1672,13 @@ async function renderSitterDashboard() {
             </div>` : ''}
 
           <div class="quick-actions">
-            <button class="action-btn" id="log-btn">
-              <span class="icon">📍</span>
-              <span>Quick Log</span>
-            </button>
             <button class="action-btn" id="messages-btn">
               <span class="icon">💬</span>
-              <span>Chat</span>
+              <span>Messages</span>
+            </button>
+            <button class="action-btn" id="settings-btn">
+              <span class="icon">⚙️</span>
+              <span>Settings</span>
             </button>
           </div>
 
@@ -1550,28 +1690,75 @@ async function renderSitterDashboard() {
             </div>
           ` : `
             <div class="section">
-              <h3>Children in Care</h3>
+              <div class="section-title">
+                <h3>Your Children</h3>
+              </div>
               <div class="children-grid">
                 ${children.map(child => `
                   <div class="child-card" data-child-id="${child.id}">
                     <div class="child-avatar">${renderAvatarHtml(child.avatar, '👶')}</div>
                     <h4>${escapeHtml(child.name)}</h4>
                     <p>Age ${escapeHtml(String(child.age))}</p>
-                    <button class="btn btn-small btn-primary" onclick="viewChildGuide('${child.id}')">View Care Guide</button>
+                    <div style="display: flex; gap: 6px;">
+                      <button class="btn btn-small btn-outline" onclick="viewChildGuide('${child.id}')">View Guide</button>
+                    </div>
                   </div>
                 `).join('')}
+              </div>
+            </div>
+
+            <div class="section">
+              <div class="section-title">
+                <h3>Shift Tools</h3>
+              </div>
+              <div class="quick-actions">
+                <button class="action-btn" id="log-btn">
+                  <span class="icon">📍</span>
+                  <span>Quick Log</span>
+                </button>
+                <button class="action-btn" id="meds-btn">
+                  <span class="icon">💊</span>
+                  <span>Medications</span>
+                </button>
               </div>
             </div>
           `}
         </div>
       </main>
 
-      ${renderSitterBottomNav('home')}
+      <nav class="bottom-nav">
+        <button class="nav-item active" data-screen="home">
+          <span class="icon">🏠</span>
+          <span>Home</span>
+        </button>
+        <button class="nav-item" data-screen="guide">
+          <span class="icon">📖</span>
+          <span>Guide</span>
+        </button>
+        <button class="nav-item" data-screen="messages">
+          <span class="icon">💬</span>
+          <span>Messages</span>
+          <span class="nav-badge" data-msg-badge style="display:none;"></span>
+        </button>
+        <button class="nav-item" data-screen="lists">
+          <span class="icon">✓</span>
+          <span>Lists</span>
+        </button>
+        <button class="nav-item" data-screen="photos">
+          <span class="icon">📸</span>
+          <span>Photos</span>
+        </button>
+      </nav>
     </div>
   `;
 
   document.getElementById('messages-btn')?.addEventListener('click', renderMessagesScreen);
+  document.getElementById('settings-btn')?.addEventListener('click', renderSitterSettings);
   document.getElementById('log-btn')?.addEventListener('click', renderShiftLogScreen);
+  document.getElementById('meds-btn')?.addEventListener('click', () => {
+    if (children.length) renderMedicationsScreen(children[0].id);
+    else showToast('Waiting for the parent to add a child', 'info');
+  });
   document.getElementById('meds-due-btn')?.addEventListener('click', () => {
     if (children.length) renderMedicationsScreen(children[0].id);
   });
@@ -1583,7 +1770,26 @@ async function renderSitterDashboard() {
 
   document.getElementById('menu-btn')?.addEventListener('click', renderSitterSettings);
 
-  attachSitterBottomNavHandlers();
+  // Bottom nav — mirrors the parent dashboard. Guide/Lists/Photos require a
+  // selected child; if none is set we send the sitter to the first child or
+  // back to the dashboard.
+  document.querySelectorAll('.nav-item').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const screen = btn.dataset.screen;
+      if (screen === 'home') return renderSitterDashboard();
+      if (screen === 'messages') return renderMessagesScreen();
+      const targetChild = state.currentChild || (children[0] && children[0].id);
+      if (!targetChild) {
+        showToast('Waiting for the parent to add a child', 'info');
+        return;
+      }
+      state.currentChild = targetChild;
+      if (screen === 'guide') return viewChildGuide(targetChild);
+      if (screen === 'lists') return renderChildChecklists(targetChild);
+      if (screen === 'photos') return renderChildPhotos(targetChild);
+    });
+  });
+
   attachContextBannerHandlers();
   mountEmergencyButton();
   hideLoading();
@@ -1731,9 +1937,18 @@ async function viewChildGuide(childId) {
       </main>
 
       <nav class="bottom-nav">
-        <button class="nav-item" onclick="viewChildGuide('${childId}')">
+        <button class="nav-item" onclick="${isParent ? `renderParentDashboard()` : `renderSitterDashboard()`}">
+          <span class="icon">🏠</span>
+          <span>Home</span>
+        </button>
+        <button class="nav-item active" onclick="viewChildGuide('${childId}')">
           <span class="icon">📖</span>
           <span>Guide</span>
+        </button>
+        <button class="nav-item" onclick="renderMessagesScreen()">
+          <span class="icon">💬</span>
+          <span>Messages</span>
+          <span class="nav-badge" data-msg-badge style="display:none;"></span>
         </button>
         <button class="nav-item" onclick="renderChildChecklists('${childId}')">
           <span class="icon">✓</span>
@@ -1742,10 +1957,6 @@ async function viewChildGuide(childId) {
         <button class="nav-item" onclick="renderChildPhotos('${childId}')">
           <span class="icon">📸</span>
           <span>Photos</span>
-        </button>
-        <button class="nav-item" onclick="${isParent ? `renderParentDashboard()` : `renderSitterDashboard()`}">
-          <span class="icon">🏠</span>
-          <span>Home</span>
         </button>
       </nav>
     </div>
@@ -3505,8 +3716,16 @@ async function renderSitterPermissionsScreen() {
               <p>Share your invite code so a sitter can join.</p>
             </div>` : sitters.map(s => `
             <div class="card permission-card" data-sitter-id="${s.id}">
-              <h3>${escapeHtml(s.user.name || s.user.email)}</h3>
-              <p style="color: var(--color-text-light); font-size: 0.9em;">${escapeHtml(s.user.email || '')}</p>
+              <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;">
+                <div>
+                  <h3 style="margin: 0;">${escapeHtml(s.user.name || s.user.email)}</h3>
+                  <p style="color: var(--color-text-light); font-size: 0.9em; margin: 4px 0 0;">${escapeHtml(s.user.email || '')}</p>
+                </div>
+                <button class="btn btn-small btn-outline remove-sitter-btn"
+                  data-sitter-id="${s.id}"
+                  data-sitter-name="${escapeHtml(s.user.name || s.user.email || 'this sitter').replace(/"/g, '&quot;')}"
+                  style="color: #c0392b; border-color: #c0392b;">Remove</button>
+              </div>
               ${[
                 ['canViewGuide', 'View care guide'],
                 ['canEditGuide', 'Edit care guide'],
@@ -3544,6 +3763,25 @@ async function renderSitterPermissionsScreen() {
       hideLoading();
       if (r.success) showToast('Permissions saved', 'success');
       else showToast(r.error, 'error');
+    }));
+  // Parent removes a sitter from the family.
+  document.querySelectorAll('.remove-sitter-btn').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      const sid = btn.dataset.sitterId;
+      const name = btn.dataset.sitterName || 'this sitter';
+      if (!confirm(`Remove ${name} from ${escapeHtml(family.name || 'this family')}? They will lose access to the care guide and shift tools. You can re-invite them later.`)) return;
+      showLoading();
+      const r = await removeSitterFromFamily(family.id, sid);
+      hideLoading();
+      if (r.success) {
+        showToast(`Removed ${name}`, 'success');
+        // Refresh local family object so sitterIds reflects the removal
+        const refreshed = await getFamily(family.id);
+        if (refreshed.success) state.currentFamily = refreshed.data;
+        renderSitterPermissionsScreen();
+      } else {
+        showToast(r.error, 'error');
+      }
     }));
 }
 
