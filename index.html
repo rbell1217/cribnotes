@@ -7,6 +7,38 @@
     <title>CribNotes — The living care guide for the families you trust</title>
     <meta name="description" content="CribNotes is the context-aware childcare guide that turns rushed handoff notes into a living reference. Built for parents, designed for sitters.">
 
+    <!-- One-time cache + SW bust mirror of the same script in app.html. Without
+         this, devices that only hit the landing page never pick up new code. -->
+    <script>
+      (function bustStaleCache() {
+        var LATEST = 'v14-landing-after-login-2026-05-11';
+        try {
+          var stored = localStorage.getItem('cribnotes-version');
+          if (stored === LATEST) return;
+          if (sessionStorage.getItem('cribnotes-bust-in-progress') === LATEST) {
+            localStorage.setItem('cribnotes-version', LATEST);
+            return;
+          }
+          sessionStorage.setItem('cribnotes-bust-in-progress', LATEST);
+          var tasks = [];
+          if ('serviceWorker' in navigator) {
+            tasks.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+              return Promise.all(regs.map(function (r) { return r.unregister(); }));
+            }).catch(function () {}));
+          }
+          if ('caches' in window) {
+            tasks.push(caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            }).catch(function () {}));
+          }
+          Promise.all(tasks).then(function () {
+            localStorage.setItem('cribnotes-version', LATEST);
+            location.reload();
+          });
+        } catch (e) {}
+      })();
+    </script>
+
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icon-192.png">
 
