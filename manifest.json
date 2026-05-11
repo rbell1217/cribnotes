@@ -2,12 +2,12 @@
   "name": "CribNotes",
   "short_name": "CribNotes",
   "description": "Living, context-aware childcare guide for parents and babysitters",
-  "start_url": "./index.html",
+  "start_url": "./app.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#FFF8F0",
-  "theme_color": "#2C3E6B",
+  "background_color": "#F5EFE6",
+  "theme_color": "#1A1A1A",
   "icons": [
     {
       "src": "icon-192.png",

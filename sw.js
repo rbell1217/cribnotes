@@ -9,13 +9,14 @@
  * Bumped CACHE_VERSION when shipping new versions to invalidate old assets.
  */
 
-const CACHE_VERSION = 'cribnotes-v2';
+const CACHE_VERSION = 'cribnotes-v3';
 // js/config.js is intentionally NOT in the shell -- it holds Firebase
 // credentials and must always be fetched fresh so config changes take effect
 // without forcing the user to clear their cache.
 const APP_SHELL = [
   './',
   './index.html',
+  './app.html',
   './css/styles.css',
   './js/app.js',
   './js/auth.js',
@@ -81,7 +82,7 @@ self.addEventListener('fetch', event => {
             }
             return response;
           })
-          .catch(() => caches.match('./index.html'));
+          .catch(() => caches.match('./app.html').then(r => r || caches.match('./index.html')));
       })
     );
     return;

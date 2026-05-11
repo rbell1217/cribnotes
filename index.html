@@ -3,135 +3,847 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="description" content="CribNotes - context-aware childcare guide for parents and babysitters">
-    <meta name="theme-color" content="#2C3E6B">
-    <title>CribNotes - Context-Aware Care Guide</title>
+    <meta name="theme-color" content="#F5EFE6">
+    <title>CribNotes — The living care guide for the families you trust</title>
+    <meta name="description" content="CribNotes is the context-aware childcare guide that turns rushed handoff notes into a living reference. Built for parents, designed for sitters.">
 
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icon-192.png">
-    <link rel="stylesheet" href="css/styles.css">
 
-    <!-- Firebase SDK v9 Compat (via CDN) -->
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-storage-compat.js"></script>
-
-    <!-- PDF.js for reading uploaded PDFs -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-      if (window.pdfjsLib) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-      }
-    </script>
-    <!-- Mammoth.js for reading uploaded Word docs -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,ital,wght@9..144,0,400;9..144,0,500;9..144,0,600;9..144,0,700;9..144,0,800;9..144,0,900;9..144,1,400;9..144,1,500;9..144,1,600&family=Inter:wght@400;500;600;700&display=swap">
 
     <style>
-      /* Pre-app diagnostic boot screen so the user never sees a white page */
-      #boot-screen {
-        position: fixed; inset: 0;
-        display: flex; align-items: center; justify-content: center;
-        background: #FFF8F0; padding: 24px; z-index: 999;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      :root {
+        --paper: #F5EFE6;
+        --paper-soft: #FAF4EA;
+        --ink: #1A1A1A;
+        --ink-soft: #2E2A26;
+        --rust: #8C2A1A;
+        --rust-deep: #6F1F11;
+        --clay: #B25A3F;
+        --sand: #E9D8BC;
+        --bone: #FAF6EE;
+        --teal: #2A9D8F;
+        --orange: #F4A261;
+        --muted: #6B6155;
+        --border: #E4DBCE;
+        --pill: 999px;
+        --r-md: 18px;
+        --r-lg: 28px;
+        --r-xl: 36px;
+        --serif: 'Fraunces', Georgia, serif;
+        --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       }
-      #boot-screen .boot-card {
-        max-width: 520px; background: white; border-radius: 12px; padding: 28px;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      html, body {
+        font-family: var(--sans);
+        background: var(--paper);
+        color: var(--ink);
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
       }
-      #boot-screen h1 { color: #2C3E6B; margin: 0 0 8px; }
-      #boot-screen p { color: #444; line-height: 1.5; margin: 8px 0; }
-      #boot-screen pre {
-        background: #2C3E6B; color: #fff; padding: 12px 14px; border-radius: 8px;
-        font-size: 0.9em; overflow: auto; margin: 12px 0;
+
+      a { color: inherit; text-decoration: none; }
+
+      .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 24px;
       }
-      #boot-screen .ok { color: #2A9D8F; font-weight: 600; }
-      #boot-screen .warn { color: #E76F51; font-weight: 600; }
-      #boot-screen ol { padding-left: 20px; }
-      #boot-screen li { margin: 4px 0; }
+
+      /* ============ Header ============ */
+      .site-header {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: rgba(245, 239, 230, 0.92);
+        backdrop-filter: blur(8px);
+        padding: 16px 0;
+        border-bottom: 1px solid transparent;
+      }
+      .site-header .container {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .brand {
+        font-family: var(--serif);
+        font-weight: 800;
+        font-size: 1.5rem;
+        letter-spacing: -0.025em;
+        color: var(--ink);
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .brand-mark {
+        display: inline-block;
+        width: 32px;
+        height: 32px;
+        background: var(--ink);
+        color: var(--paper);
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+        font-weight: 800;
+      }
+      .nav-links {
+        display: none;
+        gap: 8px;
+      }
+      .nav-links a {
+        padding: 8px 14px;
+        font-size: 0.9rem;
+        font-weight: 500;
+        border-radius: var(--pill);
+        color: var(--ink-soft);
+        transition: all 0.2s;
+      }
+      .nav-links a:hover { background: var(--bone); }
+      .nav-cta {
+        display: flex;
+        gap: 8px;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 10px 18px;
+        border-radius: var(--pill);
+        border: none;
+        font-family: var(--sans);
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        letter-spacing: -0.005em;
+      }
+      .btn-primary { background: var(--ink); color: white; }
+      .btn-primary:hover { background: #000; transform: translateY(-1px); }
+      .btn-ghost { background: transparent; color: var(--ink); }
+      .btn-ghost:hover { background: var(--bone); }
+      .btn-outline-light { background: transparent; color: white; border: 1.5px solid rgba(255,255,255,0.6); }
+      .btn-outline-light:hover { background: white; color: var(--ink); border-color: white; }
+      .btn-lg { padding: 16px 28px; font-size: 1rem; }
+
+      /* ============ Hero ============ */
+      .hero {
+        padding: 80px 0 64px;
+        text-align: center;
+      }
+      .hero h1 {
+        font-family: var(--serif);
+        font-weight: 800;
+        font-size: clamp(2.5rem, 8vw, 5.5rem);
+        line-height: 0.96;
+        letter-spacing: -0.035em;
+        margin-bottom: 24px;
+        max-width: 16ch;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      .hero h1 em {
+        font-style: italic;
+        font-weight: 500;
+      }
+      .hero-sub {
+        font-size: 1.15rem;
+        color: var(--muted);
+        max-width: 540px;
+        margin: 0 auto 32px;
+        line-height: 1.55;
+      }
+      .hero-cta {
+        display: inline-flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .hero-trust {
+        margin-top: 40px;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      /* ============ Big rounded color blocks ============ */
+      .block {
+        background: var(--rust);
+        color: white;
+        border-radius: var(--r-xl);
+        padding: 56px 40px;
+        margin-bottom: 16px;
+        position: relative;
+        overflow: hidden;
+      }
+      .block.is-ink { background: var(--ink); }
+      .block.is-clay { background: var(--clay); }
+      .block.is-teal { background: var(--teal); }
+      .block.is-bone { background: var(--bone); color: var(--ink); }
+      .block-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+        align-items: center;
+      }
+      .block-text {
+        max-width: 480px;
+      }
+      .eyebrow {
+        font-family: var(--serif);
+        font-style: italic;
+        font-weight: 500;
+        font-size: 1.05rem;
+        opacity: 0.7;
+        margin-bottom: 10px;
+        display: block;
+      }
+      .block h2 {
+        font-family: var(--serif);
+        font-weight: 700;
+        font-size: clamp(2rem, 5vw, 3rem);
+        letter-spacing: -0.025em;
+        line-height: 1;
+        margin-bottom: 18px;
+        color: inherit;
+      }
+      .block-text p {
+        font-size: 1.05rem;
+        opacity: 0.9;
+        margin-bottom: 24px;
+        line-height: 1.55;
+      }
+      .block.is-bone p { opacity: 1; color: var(--muted); }
+      .block .btn-outline-light {
+        margin-top: 4px;
+      }
+
+      .block-visual {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        min-height: 220px;
+      }
+
+      /* Phone-mockup-y SVG container for blocks */
+      .phone-mock {
+        background: var(--paper);
+        border-radius: 24px;
+        padding: 18px 16px;
+        max-width: 280px;
+        width: 100%;
+        box-shadow: 0 24px 56px rgba(0,0,0,0.25);
+        color: var(--ink);
+      }
+      .phone-mock .mock-pill {
+        background: var(--ink);
+        color: white;
+        font-size: 0.6rem;
+        padding: 4px 10px;
+        border-radius: var(--pill);
+        display: inline-block;
+        margin-bottom: 10px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: lowercase;
+      }
+      .phone-mock h4 {
+        font-family: var(--serif);
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        margin-bottom: 10px;
+      }
+      .phone-mock .mock-row {
+        padding: 8px 10px;
+        background: var(--bone);
+        border-radius: 10px;
+        font-size: 0.7rem;
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .phone-mock .mock-row .mock-emoji { font-size: 0.85rem; }
+      .phone-mock .mock-tag {
+        font-family: var(--serif);
+        font-style: italic;
+        font-size: 0.62rem;
+        padding: 1px 8px;
+        background: var(--ink);
+        color: white;
+        border-radius: var(--pill);
+        margin-left: auto;
+        font-weight: 500;
+      }
+      .phone-mock .mock-tag.is-orange { background: var(--orange); color: var(--ink); }
+      .phone-mock .mock-tag.is-rust { background: var(--rust); color: white; }
+      .phone-mock .mock-tag.is-teal { background: var(--teal); }
+
+      .emergency-mock {
+        background: var(--paper);
+        border-radius: 24px;
+        padding: 18px 16px;
+        max-width: 260px;
+        width: 100%;
+        box-shadow: 0 24px 56px rgba(0,0,0,0.25);
+        color: var(--ink);
+      }
+      .emergency-mock .em-row {
+        background: var(--rust);
+        color: white;
+        padding: 12px 14px;
+        border-radius: 14px;
+        margin-bottom: 8px;
+        font-family: var(--serif);
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .emergency-mock .em-row.is-orange { background: var(--clay); }
+      .emergency-mock .em-row.is-navy { background: var(--ink); }
+      .emergency-mock .em-row.is-teal { background: var(--teal); }
+      .emergency-mock .em-row small { font-family: var(--sans); font-weight: 400; font-size: 0.7rem; opacity: 0.85; display: block; }
+
+      /* ============ Pillars / Feature grid ============ */
+      .pillars {
+        padding: 64px 0;
+        text-align: center;
+      }
+      .section-eyebrow {
+        font-family: var(--serif);
+        font-style: italic;
+        font-weight: 500;
+        font-size: 1.1rem;
+        color: var(--muted);
+        margin-bottom: 12px;
+        display: block;
+      }
+      .section-title {
+        font-family: var(--serif);
+        font-weight: 800;
+        font-size: clamp(2rem, 5vw, 3rem);
+        letter-spacing: -0.025em;
+        line-height: 1.05;
+        margin-bottom: 16px;
+      }
+      .section-lead {
+        font-size: 1.1rem;
+        color: var(--muted);
+        max-width: 560px;
+        margin: 0 auto 48px;
+        line-height: 1.55;
+      }
+      .pillar-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+        text-align: left;
+      }
+      .pillar {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: var(--r-lg);
+        padding: 32px 28px;
+        transition: all 0.25s;
+      }
+      .pillar:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 16px 40px rgba(0,0,0,0.08);
+      }
+      .pillar-icon {
+        font-size: 2rem;
+        margin-bottom: 16px;
+        display: inline-block;
+      }
+      .pillar h3 {
+        font-family: var(--serif);
+        font-weight: 700;
+        font-size: 1.3rem;
+        letter-spacing: -0.015em;
+        margin-bottom: 10px;
+        line-height: 1.2;
+      }
+      .pillar p {
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.55;
+      }
+
+      /* ============ Persona split ============ */
+      .personas {
+        padding: 32px 0 80px;
+      }
+      .persona-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+      .persona-card {
+        background: var(--ink);
+        color: white;
+        border-radius: var(--r-xl);
+        padding: 40px 32px;
+        position: relative;
+        overflow: hidden;
+      }
+      .persona-card.is-rust { background: var(--rust); }
+      .persona-card h3 {
+        font-family: var(--serif);
+        font-style: italic;
+        font-weight: 500;
+        font-size: 1.2rem;
+        opacity: 0.7;
+        margin-bottom: 6px;
+      }
+      .persona-card h2 {
+        font-family: var(--serif);
+        font-weight: 800;
+        font-size: clamp(1.8rem, 4.5vw, 2.5rem);
+        letter-spacing: -0.025em;
+        line-height: 1.05;
+        margin-bottom: 16px;
+      }
+      .persona-card p {
+        opacity: 0.9;
+        line-height: 1.55;
+        margin-bottom: 24px;
+        font-size: 1rem;
+      }
+      .persona-card ul {
+        list-style: none;
+        padding: 0;
+        margin: 0 0 24px;
+      }
+      .persona-card li {
+        padding: 8px 0;
+        border-bottom: 1px solid rgba(255,255,255,0.18);
+        font-size: 0.95rem;
+        opacity: 0.95;
+      }
+      .persona-card li:last-child { border-bottom: none; }
+      .persona-card li::before {
+        content: '→';
+        margin-right: 10px;
+        font-family: var(--serif);
+        font-weight: 600;
+      }
+
+      /* ============ Quote / pull ============ */
+      .pullquote {
+        padding: 80px 0;
+        text-align: center;
+      }
+      .pullquote blockquote {
+        font-family: var(--serif);
+        font-weight: 500;
+        font-style: italic;
+        font-size: clamp(1.5rem, 4vw, 2.5rem);
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+        max-width: 22ch;
+        margin: 0 auto 24px;
+        color: var(--ink);
+      }
+      .pullquote cite {
+        font-style: normal;
+        font-size: 0.9rem;
+        color: var(--muted);
+        font-family: var(--sans);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      /* ============ Big CTA at bottom ============ */
+      .final-cta {
+        background: var(--ink);
+        color: white;
+        border-radius: var(--r-xl);
+        padding: 80px 32px;
+        text-align: center;
+        margin-bottom: 24px;
+      }
+      .final-cta h2 {
+        font-family: var(--serif);
+        font-weight: 800;
+        font-size: clamp(2.5rem, 7vw, 4.5rem);
+        letter-spacing: -0.03em;
+        line-height: 1;
+        margin-bottom: 20px;
+      }
+      .final-cta h2 em { font-style: italic; font-weight: 500; }
+      .final-cta p {
+        opacity: 0.8;
+        max-width: 480px;
+        margin: 0 auto 32px;
+        font-size: 1.05rem;
+        line-height: 1.55;
+      }
+      .final-cta .btn-primary {
+        background: white;
+        color: var(--ink);
+      }
+      .final-cta .btn-primary:hover { background: var(--bone); }
+
+      /* ============ Footer ============ */
+      footer {
+        padding: 32px 0 48px;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      footer .container {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      footer .foot-links {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+      footer .foot-links a {
+        color: var(--muted);
+        text-decoration: none;
+      }
+      footer .foot-links a:hover { color: var(--ink); }
+      footer .foot-brand {
+        font-family: var(--serif);
+        font-weight: 700;
+        color: var(--ink);
+        font-size: 1rem;
+      }
+
+      /* ============ Responsive ============ */
+      @media (min-width: 720px) {
+        .nav-links { display: inline-flex; }
+        .pillar-grid { grid-template-columns: repeat(3, 1fr); }
+        .block { padding: 64px 56px; }
+        .block-grid { grid-template-columns: 1fr 1fr; gap: 32px; }
+        .persona-grid { grid-template-columns: 1fr 1fr; }
+        footer .container { flex-direction: row; justify-content: space-between; align-items: center; }
+      }
+
+      @media (min-width: 1024px) {
+        .hero { padding: 120px 0 96px; }
+        .block { padding: 80px 72px; }
+        .block-text p { font-size: 1.15rem; }
+        .pillar { padding: 40px 36px; }
+        .final-cta { padding: 120px 56px; }
+      }
     </style>
 </head>
 <body>
-    <!-- Diagnostic boot screen. The app removes this once it has booted. -->
-    <div id="boot-screen">
-      <div class="boot-card">
-        <h1>CribNotes</h1>
-        <p id="boot-status">Starting up...</p>
-        <div id="boot-detail"></div>
+    <header class="site-header">
+      <div class="container">
+        <a href="/" class="brand">
+          <span class="brand-mark">C</span>
+          CribNotes
+        </a>
+        <nav class="nav-links">
+          <a href="#parents">For parents</a>
+          <a href="#sitters">For sitters</a>
+          <a href="#features">Features</a>
+        </nav>
+        <div class="nav-cta">
+          <a href="/app.html" class="btn btn-ghost">Sign in</a>
+          <a href="/app.html" class="btn btn-primary">Get started</a>
+        </div>
       </div>
-    </div>
+    </header>
 
-    <div id="app-root"></div>
+    <main>
 
-    <!-- Persistent Emergency button portal (rendered by app.js when sitter is logged in) -->
-    <div id="emergency-portal"></div>
+      <!-- ============ Hero ============ -->
+      <section class="hero container">
+        <h1>The living care guide for <em>the families you trust</em></h1>
+        <p class="hero-sub">
+          CribNotes turns rushed handoff notes into a context-aware guide.
+          Dictate once, surface only what matters this shift, never miss a dose.
+        </p>
+        <div class="hero-cta">
+          <a href="/app.html" class="btn btn-primary btn-lg">Start free</a>
+          <a href="#features" class="btn btn-ghost btn-lg">See how it works</a>
+        </div>
+        <p class="hero-trust">Built for parents. Designed for sitters. Free for one family.</p>
+      </section>
 
-    <!-- Toast/modal portal -->
-    <div id="overlay-portal"></div>
+      <!-- ============ Color blocks ============ -->
+      <section id="features" class="container">
 
-    <!-- Pre-app diagnostics: detects file:// loading and other show-stoppers
-         BEFORE attempting to load the ES module so the user always sees
-         something useful even if module imports fail. -->
-    <script>
-      (function bootDiagnose() {
-        var status = document.getElementById('boot-status');
-        var detail = document.getElementById('boot-detail');
+        <article class="block">
+          <div class="block-grid">
+            <div class="block-text">
+              <span class="eyebrow">CribNotes</span>
+              <h2>Notes that know what time it is</h2>
+              <p>
+                Every instruction is tagged by day, time of day, shift length, and special context.
+                When a sitter starts a Saturday morning short visit, they see only what matters then.
+                No more scrolling through bedtime rituals at 9am.
+              </p>
+              <a href="/app.html" class="btn btn-outline-light">Try the context engine</a>
+            </div>
+            <div class="block-visual">
+              <div class="phone-mock">
+                <span class="mock-pill">saturday · morning · short</span>
+                <h4>Daily Schedule</h4>
+                <div class="mock-row">
+                  <span class="mock-emoji">🥣</span>
+                  Oatmeal at 8am
+                  <span class="mock-tag is-orange">morning</span>
+                </div>
+                <div class="mock-row">
+                  <span class="mock-emoji">🎨</span>
+                  Park or craft after breakfast
+                  <span class="mock-tag is-teal">weekend</span>
+                </div>
+                <div class="mock-row">
+                  <span class="mock-emoji">🌳</span>
+                  Outdoor play before lunch
+                  <span class="mock-tag">morning</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
 
-        function fail(msg, html) {
-          status.innerHTML = '<span class="warn">' + msg + '</span>';
-          if (html) detail.innerHTML = html;
-        }
+        <article class="block is-ink">
+          <div class="block-grid">
+            <div class="block-visual">
+              <div class="emergency-mock">
+                <div class="em-row">
+                  🚨 Call 911
+                  <small>Emergency Services</small>
+                </div>
+                <div class="em-row is-orange">
+                  ☠️ Poison Control
+                  <small>1-800-222-1222</small>
+                </div>
+                <div class="em-row is-navy">
+                  👨‍👩 Call Parent
+                  <small>Mom on file</small>
+                </div>
+                <div class="em-row is-teal">
+                  🩺 Pediatrician
+                  <small>Dr. Patel</small>
+                </div>
+              </div>
+            </div>
+            <div class="block-text">
+              <span class="eyebrow">Emergency Mode</span>
+              <h2>One tap to the right number</h2>
+              <p>
+                A floating Emergency button follows the sitter through every screen.
+                One tap opens the quick-dial stack: 911, Poison Control, the parent,
+                the pediatrician, with allergies and blood type right there on screen.
+              </p>
+              <a href="/app.html" class="btn btn-outline-light">See Emergency Mode</a>
+            </div>
+          </div>
+        </article>
 
-        // file:// breaks ES modules + service worker + most fetches.
-        if (location.protocol === 'file:') {
-          fail('CribNotes needs to be served from a local web server.',
-            '<p>You opened the file directly with a double-click. Browsers block ES modules and service workers loaded via <code>file://</code>.</p>' +
-            '<p>Open Terminal in the <code>cribnotes-app</code> folder and run one of:</p>' +
-            '<pre>python3 -m http.server 8000</pre>' +
-            '<pre>npx http-server -p 8000</pre>' +
-            '<p>Then visit <a href="http://localhost:8000">http://localhost:8000</a> in your browser.</p>');
-          return;
-        }
+        <article class="block is-clay">
+          <div class="block-grid">
+            <div class="block-text">
+              <span class="eyebrow">Medication Tracker</span>
+              <h2>The double-dose conversation, before it happens</h2>
+              <p>
+                Scheduled meds prompt the sitter at the right time, every time.
+                A confirmation step before the dose is logged, and a strict
+                cooldown warning if anyone tries to administer twice.
+                The kind of feature you only wish you had once.
+              </p>
+              <a href="/app.html" class="btn btn-outline-light">Explore medications</a>
+            </div>
+            <div class="block-visual">
+              <div class="phone-mock">
+                <span class="mock-pill" style="background: var(--rust);">due now</span>
+                <h4>Tylenol — 5 mL</h4>
+                <div class="mock-row">
+                  <span class="mock-emoji">⏰</span>
+                  Scheduled 14:00 · oral
+                  <span class="mock-tag is-rust">12m late</span>
+                </div>
+                <div class="mock-row">
+                  <span class="mock-emoji">💊</span>
+                  Last dose: 9:48am
+                </div>
+                <button class="btn btn-primary" style="width: 100%; margin-top: 8px;">Record Dose</button>
+              </div>
+            </div>
+          </div>
+        </article>
 
-        // Check that the firebase compat SDK actually loaded.
-        if (typeof firebase === 'undefined') {
-          fail('Firebase SDK did not load.',
-            '<p>Check that you have an internet connection. CribNotes loads Firebase from Google\'s CDN.</p>' +
-            '<p>Open browser DevTools (Cmd-Option-I) and check the Network tab for blocked requests.</p>');
-          return;
-        }
+        <article class="block is-bone">
+          <div class="block-grid">
+            <div class="block-text">
+              <span class="eyebrow">End of Shift</span>
+              <h2 style="color: var(--ink);">A recap, automatically</h2>
+              <p>
+                When the sitter ends the shift, CribNotes hands the parent a digestible summary:
+                total hours, naps, meals, diapers, medications, and every flagged moment.
+                No more "How did it go?" by text at 11pm.
+              </p>
+              <a href="/app.html" class="btn btn-primary">See a sample summary</a>
+            </div>
+            <div class="block-visual">
+              <div class="phone-mock">
+                <span class="mock-pill">4h 22m · sat afternoon</span>
+                <h4>Shift Summary</h4>
+                <div class="mock-row"><span class="mock-emoji">💤</span> 2 naps · 95m total</div>
+                <div class="mock-row"><span class="mock-emoji">🍽️</span> 1 meal, 2 snacks</div>
+                <div class="mock-row"><span class="mock-emoji">👶</span> 3 diapers</div>
+                <div class="mock-row"><span class="mock-emoji">💊</span> 1 dose recorded</div>
+                <div class="mock-row" style="background: var(--rust); color: white;">
+                  <span class="mock-emoji">🚩</span> 1 flagged moment
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
 
-        // After 6 seconds, if app.js never tore down the boot screen,
-        // something failed silently. Surface a hint.
-        setTimeout(function () {
-          if (document.getElementById('boot-screen')) {
-            var msg = 'App started but never finished initializing.';
-            var hint = '<p>Open DevTools Console (Cmd-Option-J) and look for an error.</p>' +
-              '<p>Common causes:</p>' +
-              '<ol>' +
-                '<li>Firebase not configured yet &mdash; edit <code>js/config.js</code> with your project credentials.</li>' +
-                '<li>An ES module import failed &mdash; the Console will show the exact file.</li>' +
-                '<li>The browser is too old (CribNotes needs Chrome 105+, Safari 15.4+, Firefox 121+).</li>' +
-              '</ol>';
-            status.innerHTML = '<span class="warn">' + msg + '</span>';
-            detail.innerHTML = hint;
-          }
-        }, 6000);
-      })();
-    </script>
+      </section>
 
-    <!-- Main App Script. The app removes #boot-screen once it has rendered. -->
-    <script type="module" src="js/app.js"></script>
+      <!-- ============ Pillars / Features ============ -->
+      <section class="pillars container">
+        <span class="section-eyebrow">Why CribNotes</span>
+        <h2 class="section-title">Built for the moments that matter</h2>
+        <p class="section-lead">
+          A childcare app shouldn't make the sitter scroll through a wall of text
+          while a toddler tugs at their leg. CribNotes shows the right thing at the right time.
+        </p>
 
-    <!-- Service worker registration: enables offline mode + Web Push -->
-    <script>
-      if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-        window.addEventListener('load', function () {
-          navigator.serviceWorker.register('sw.js').catch(function (err) {
-            console.warn('[CribNotes] Service worker registration failed:', err);
-          });
-        });
-      }
-    </script>
+        <div class="pillar-grid">
+          <div class="pillar">
+            <span class="pillar-icon">🎙️</span>
+            <h3>Dictate, don't type</h3>
+            <p>
+              Parents talk through the day naturally. CribNotes transcribes,
+              cleans, and auto-files instructions into the right sections with context tags.
+            </p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon">🛡️</span>
+            <h3>Critical info, always pinned</h3>
+            <p>
+              Allergies, current medications, insurance, blood type, and pediatrician
+              live at the top of every guide. Never context-filtered, never buried.
+            </p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon">📍</span>
+            <h3>Quick statuses, one tap</h3>
+            <p>
+              "Down for nap." "Just ate." "Diaper change." The sitter logs it in a tap.
+              Parents get the chronological feed in real time.
+            </p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon">🚩</span>
+            <h3>Flag a moment, send a push</h3>
+            <p>
+              Something the parent should know now? Sitter flags the entry,
+              parent gets an instant push notification. No SMS thread chaos.
+            </p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon">📶</span>
+            <h3>Works in the basement</h3>
+            <p>
+              Service worker + offline persistence keep the guide readable
+              when the basement playroom has bad signal. Syncs when reconnected.
+            </p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon">🤝</span>
+            <h3>Shift-to-shift handoffs</h3>
+            <p>
+              Multiple sitters? Each shift leaves a note for the next.
+              The day-of-the-week filter respects whoever is on the clock.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Personas ============ -->
+      <section id="parents" class="personas container">
+        <span class="section-eyebrow" style="text-align: center; display: block;">For everyone in the rotation</span>
+        <h2 class="section-title" style="text-align: center;">Two views, one source of truth</h2>
+
+        <div class="persona-grid">
+          <article class="persona-card">
+            <h3 id="parents">Parents</h3>
+            <h2>Write the guide once. Update on the fly.</h2>
+            <ul>
+              <li>Dictate notes naturally, no typing</li>
+              <li>Upload a PDF or Word doc you already wrote</li>
+              <li>Pin allergies, meds, insurance at the top</li>
+              <li>Generate an invite code per sitter</li>
+              <li>Get end-of-shift summaries instead of late-night texts</li>
+            </ul>
+            <a href="/app.html" class="btn btn-outline-light">Create your family</a>
+          </article>
+
+          <article class="persona-card is-rust" id="sitters">
+            <h3>Sitters</h3>
+            <h2>Start your shift. See only what matters.</h2>
+            <ul>
+              <li>One screen filtered to your shift's context</li>
+              <li>Tap quick statuses instead of texting parents</li>
+              <li>Emergency stack one tap away from every screen</li>
+              <li>Medication prompts at the scheduled time</li>
+              <li>Auto-summary when the shift ends, hands you free</li>
+            </ul>
+            <a href="/app.html" class="btn btn-outline-light">Join with invite code</a>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============ Pull quote ============ -->
+      <section class="pullquote container">
+        <blockquote>
+          The right note. The right minute. <em>Every shift.</em>
+        </blockquote>
+        <cite>The CribNotes promise</cite>
+      </section>
+
+      <!-- ============ Final CTA ============ -->
+      <section class="container">
+        <div class="final-cta">
+          <h2>Get started <em>in five minutes</em></h2>
+          <p>
+            Create a family, add a child, dictate your first care guide,
+            and share an invite code with your sitter. No credit card. No setup wizard.
+          </p>
+          <a href="/app.html" class="btn btn-primary btn-lg">Open CribNotes</a>
+        </div>
+      </section>
+
+    </main>
+
+    <footer>
+      <div class="container">
+        <span class="foot-brand">CribNotes</span>
+        <nav class="foot-links">
+          <a href="/app.html">Sign in</a>
+          <a href="#features">Features</a>
+          <a href="#parents">For parents</a>
+          <a href="#sitters">For sitters</a>
+        </nav>
+      </div>
+    </footer>
+
 </body>
 </html>
