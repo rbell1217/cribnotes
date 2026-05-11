@@ -30,7 +30,8 @@ import {
   acceptFamilyInvite, declineFamilyInvite, cancelFamilyInvite,
   uploadUserAvatar, uploadChildAvatar, removeUserAvatar, removeChildAvatar,
   findFamilyForSitter,
-  listMyFamilies, setActiveFamily, leaveFamily, removeSitterFromFamily
+  listMyFamilies, setActiveFamily, leaveFamily, removeSitterFromFamily,
+  updateUserProfile
 } from './database.js';
 
 import {
@@ -3858,6 +3859,7 @@ async function enablePushFromSettings() {
 
 function renderProfileSettings() {
   const av = state.userData.avatar;
+  const isParent = state.userData.role === 'parent';
   showModal(`
     <h3>Profile</h3>
 
@@ -3872,9 +3874,27 @@ function renderProfileSettings() {
       </div>
     </div>
 
-    <p><strong>Name:</strong> ${escapeHtml(state.userData.name)}</p>
-    <p><strong>Email:</strong> ${escapeHtml(state.userData.email)}</p>
-    <p><strong>Role:</strong> ${state.userData.role === 'parent' ? 'Parent/Guardian' : 'Babysitter'}</p>
+    <label class="form-label" for="profile-name">Name</label>
+    <input id="profile-name" class="form-input" value="${escapeHtml(state.userData.name || '')}" placeholder="Your name">
+
+    <label class="form-label" for="profile-phone" style="margin-top: 12px;">Phone number</label>
+    <input id="profile-phone" class="form-input" type="tel" inputmode="tel"
+      value="${escapeHtml(state.userData.phone || '')}"
+      placeholder="${isParent ? '401-555-1234 — sitters tap this to call you in emergencies' : '401-555-1234'}">
+    ${isParent ? `<p style="font-size: 0.82em; color: var(--color-text-light); margin: 6px 0 0;">
+      Your sitter sees this on the Emergency button. Add it so they can reach you with one tap.
+    </p>` : `<p style="font-size: 0.82em; color: var(--color-text-light); margin: 6px 0 0;">
+      Optional. Parents can use this to reach you if needed.
+    </p>`}
+
+    <p style="margin-top: 14px;"><strong>Email:</strong> ${escapeHtml(state.userData.email)}</p>
+    <p><strong>Role:</strong> ${isParent ? 'Parent/Guardian' : 'Babysitter'}</p>
+
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" id="profile-save-btn" style="flex: 1;">Save</button>
+      <button class="btn btn-outline" onclick="closeModal()">Close</button>
+    </div>
+
     <hr style="margin: 16px 0;">
     <button class="btn btn-outline btn-full" onclick="switchProfile()" style="color: var(--color-rust); border-color: var(--color-rust);">
       Switch Role
@@ -3883,6 +3903,26 @@ function renderProfileSettings() {
       Change between Parent and Babysitter profiles
     </p>
   `);
+
+  document.getElementById('profile-save-btn')?.addEventListener('click', async () => {
+    const name = document.getElementById('profile-name').value.trim();
+    const phone = document.getElementById('profile-phone').value.trim();
+    if (!name) { showToast('Name cannot be empty', 'error'); return; }
+    showLoading();
+    const r = await updateUserProfile({ name, phone });
+    hideLoading();
+    if (!r.success) { showToast(r.error || 'Could not save', 'error'); return; }
+    state.userData.name = name;
+    state.userData.phone = phone;
+    // Mirror into local family state so the emergency stack picks it up
+    // without needing a fresh family fetch.
+    if (state.userData.role === 'parent' && state.currentFamily) {
+      state.currentFamily.parentContacts = state.currentFamily.parentContacts || {};
+      state.currentFamily.parentContacts[state.currentUser.uid] = { name, phone };
+    }
+    showToast('Profile saved', 'success');
+    closeModal();
+  });
 
   document.getElementById('profile-avatar-input')?.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
@@ -4812,15 +4852,37 @@ async function renderEmergencyStack() {
   const critical = child?.critical || {};
   const family = state.currentFamily;
 
-  // Build quick-dial list: 911, Poison Control, parents on the family,
-  // emergency contacts on the child, then pediatrician
+  // Build quick-dial list: 911, Poison Control, every parent on the family
+  // with a phone number on file, child-level emergency contacts, then
+  // pediatrician.
   const dials = [];
   dials.push({ label: 'Call 911', sub: 'Emergency Services', tel: '911', accent: 'red' });
   dials.push({ label: 'Poison Control', sub: '1-800-222-1222', tel: '18002221222', accent: 'orange' });
-  // Parents (first parentId resolved in family doc; we render generically)
-  if (family?.parentIds?.length) {
-    dials.push({ label: 'Call Parent', sub: 'Family parent on file', tel: family.primaryParentPhone || '', accent: 'navy' });
+
+  // One dial per parent with a phone on file
+  const parentContacts = (family && family.parentContacts) || {};
+  let parentsWithPhones = 0;
+  Object.entries(parentContacts).forEach(([uid, contact]) => {
+    if (!contact || !contact.phone) return;
+    parentsWithPhones++;
+    dials.push({
+      label: `Call ${contact.name || 'Parent'}`,
+      sub: 'Parent on file',
+      tel: contact.phone,
+      accent: 'navy'
+    });
+  });
+  // If a parent exists on the family but hasn't entered a phone yet, show a
+  // tappable row that explains why — so the sitter knows to text instead.
+  if (parentsWithPhones === 0 && family?.parentIds?.length) {
+    dials.push({
+      label: 'No parent phone on file',
+      sub: 'Ask the parent to add their phone in Profile',
+      tel: '',
+      accent: 'navy'
+    });
   }
+
   (critical.emergencyContacts || []).forEach(p => {
     if (!p?.phone) return;
     dials.push({ label: p.name, sub: p.relationship || 'Emergency contact', tel: p.phone, accent: 'navy' });

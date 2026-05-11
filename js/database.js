@@ -70,6 +70,45 @@ export async function getFamily(familyId) {
  *
  * Returns { success, familyId } or { success: false, error }.
  */
+/**
+ * Update the current user's profile fields (name, phone). When a parent
+ * updates these, also mirror them onto the family doc under
+ * `parentContacts[uid] = { name, phone }` so sitters can read parent contact
+ * info under default Firestore rules without needing per-user read access.
+ */
+export async function updateUserProfile(updates) {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('No user logged in');
+    const userRef = db().collection('users').doc(user.uid);
+    const clean = {};
+    if (typeof updates.name === 'string') clean.name = updates.name;
+    if (typeof updates.phone === 'string') clean.phone = updates.phone;
+    if (Object.keys(clean).length === 0) return { success: true };
+    await userRef.update(clean);
+    // Mirror onto the active family doc so the emergency-mode dial can
+    // discover parent contact info without per-user reads.
+    try {
+      const me = await userRef.get();
+      const mine = me.exists ? me.data() : {};
+      if (mine.familyId && mine.role === 'parent') {
+        const famRef = db().collection('families').doc(mine.familyId);
+        await famRef.update({
+          [`parentContacts.${user.uid}`]: {
+            name: clean.name || mine.name || '',
+            phone: clean.phone || mine.phone || ''
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('Could not mirror profile to family doc:', e.message);
+    }
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 export async function findFamilyForSitter(uid) {
   try {
     if (!uid) throw new Error('No uid');
