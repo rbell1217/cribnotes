@@ -604,6 +604,142 @@ export async function enableOfflinePersistence() {
 }
 
 /**
+ * Family search + bidirectional join requests
+ * ---------------------------------------------
+ * A sitter can search for families by parent email or family name and request
+ * to join. The parent sees pending requests and approves or declines.
+ *
+ * Stored at /joinRequests/{reqId} (top-level so sitters can read their own
+ * requests even before they're a member of any family).
+ */
+
+export async function searchFamiliesByParentEmail(emailSubstring) {
+  try {
+    // Find users with role 'parent' whose email matches, then look up their families.
+    // Firestore doesn't support substring search natively. We'll fetch a
+    // bounded set and filter client-side. For a prototype this is fine.
+    const usersSnap = await db().collection('users')
+      .where('role', '==', 'parent').limit(50).get();
+    const matches = usersSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(u => (u.email || '').toLowerCase().includes(emailSubstring.toLowerCase()) && u.familyId);
+
+    const familyIds = Array.from(new Set(matches.map(m => m.familyId).filter(Boolean)));
+    const families = [];
+    for (const fid of familyIds) {
+      const fdoc = await db().collection('families').doc(fid).get();
+      if (fdoc.exists) {
+        const fdata = fdoc.data();
+        families.push({
+          id: fdoc.id,
+          name: fdata.name,
+          parentNames: matches
+            .filter(m => m.familyId === fid)
+            .map(m => ({ name: m.name, email: m.email }))
+        });
+      }
+    }
+    return { success: true, data: families };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function requestToJoinFamily(familyId, message = '') {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    const userDoc = await db().collection('users').doc(user.uid).get();
+    const userData = userDoc.exists ? userDoc.data() : {};
+
+    // Check if a pending request already exists
+    const existing = await db().collection('joinRequests')
+      .where('sitterId', '==', user.uid)
+      .where('familyId', '==', familyId)
+      .where('status', '==', 'pending')
+      .limit(1).get();
+    if (!existing.empty) {
+      return { success: true, alreadyPending: true, requestId: existing.docs[0].id };
+    }
+
+    const ref = await db().collection('joinRequests').add({
+      sitterId: user.uid,
+      sitterName: userData.name || user.displayName || user.email,
+      sitterEmail: user.email,
+      familyId,
+      status: 'pending',
+      message,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true, requestId: ref.id };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function listMyJoinRequests() {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    const snap = await db().collection('joinRequests')
+      .where('sitterId', '==', user.uid).get();
+    const reqs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return { success: true, data: reqs };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function listFamilyJoinRequests(familyId) {
+  try {
+    const snap = await db().collection('joinRequests')
+      .where('familyId', '==', familyId)
+      .where('status', '==', 'pending').get();
+    const reqs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return { success: true, data: reqs };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function approveJoinRequest(requestId) {
+  try {
+    const reqDoc = await db().collection('joinRequests').doc(requestId).get();
+    if (!reqDoc.exists) throw new Error('Request not found');
+    const req = reqDoc.data();
+
+    // Add sitter to family
+    await db().collection('families').doc(req.familyId).update({
+      sitterIds: firebase.firestore.FieldValue.arrayUnion(req.sitterId)
+    });
+    // Set the sitter's familyId
+    await db().collection('users').doc(req.sitterId).update({
+      familyId: req.familyId
+    });
+    // Mark request approved
+    await db().collection('joinRequests').doc(requestId).update({
+      status: 'approved',
+      resolvedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function declineJoinRequest(requestId) {
+  try {
+    await db().collection('joinRequests').doc(requestId).update({
+      status: 'declined',
+      resolvedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Search across care guide
  */
 export async function searchGuide(familyId, childId, searchTerm) {

@@ -21,7 +21,10 @@ import {
   updateCriticalInfo, getCriticalInfo,
   postQuickStatus,
   setSitterPermissions, getSitterPermissions,
-  enableOfflinePersistence
+  enableOfflinePersistence,
+  searchFamiliesByParentEmail, requestToJoinFamily,
+  listMyJoinRequests, listFamilyJoinRequests,
+  approveJoinRequest, declineJoinRequest
 } from './database.js';
 
 import {
@@ -637,22 +640,45 @@ function renderParentOnboarding() {
 // SITTER ONBOARDING
 // ============================================================================
 
-function renderSitterOnboarding() {
+async function renderSitterOnboarding() {
   const root = document.getElementById('app-root');
+
+  // Check whether the sitter has any pending join requests so we can show them
+  const myReqs = await listMyJoinRequests();
+  const pending = (myReqs.success ? myReqs.data : []).filter(r => r.status === 'pending');
+
   root.innerHTML = `
     <div class="container container-small">
       <div class="card">
-        <h1>Join a Family</h1>
-        <p>Enter the invite code from the parent to join their family</p>
+        <h1 style="font-family: var(--font-display); font-size: 2.25rem; letter-spacing: -0.025em;">Join a family</h1>
+        <p style="color: var(--color-text-light); margin-bottom: 1.5rem;">
+          Find a family by the parent's email, or paste an invite code if you already have one.
+        </p>
+
+        ${pending.length ? `
+          <div class="handoff-note" style="margin-bottom: 1rem;">
+            <strong>Pending request</strong><br>
+            You've requested to join ${pending.length} ${pending.length === 1 ? 'family' : 'families'}. Waiting for approval.
+          </div>
+        ` : ''}
+
+        <div class="form-group">
+          <label for="family-search">Search by parent email</label>
+          <input type="text" id="family-search" placeholder="parent@example.com">
+        </div>
+        <button id="search-families-btn" class="btn btn-outline btn-full">Search families</button>
+
+        <div id="search-results" style="margin-top: 1rem;"></div>
+
+        <div class="divider"></div>
 
         <form id="invite-form" class="form">
           <div class="form-group">
-            <label for="invite-code">Invite Code</label>
+            <label for="invite-code">Or enter an invite code</label>
             <input type="text" id="invite-code" placeholder="e.g., ABC123" maxlength="6"
-              style="text-transform: uppercase; letter-spacing: 0.15em; font-size: 1.2em; text-align: center;"
-              required>
+              style="text-transform: uppercase; letter-spacing: 0.15em; font-size: 1.2em; text-align: center;">
           </div>
-          <button type="submit" class="btn btn-primary btn-full">Join Family</button>
+          <button type="submit" class="btn btn-primary btn-full">Join with code</button>
         </form>
 
         <div class="divider"></div>
@@ -663,10 +689,14 @@ function renderSitterOnboarding() {
     </div>
   `;
 
+  // Invite code path (existing behavior)
   document.getElementById('invite-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const code = document.getElementById('invite-code').value.toUpperCase();
-
+    if (!code) {
+      showToast('Enter an invite code first', 'error');
+      return;
+    }
     showLoading();
     const result = await joinFamilyWithCode(code);
     if (!result.success) {
@@ -678,6 +708,50 @@ function renderSitterOnboarding() {
       hideLoading();
       await routeApp();
     }
+  });
+
+  // Family search path
+  document.getElementById('search-families-btn').addEventListener('click', async () => {
+    const q = document.getElementById('family-search').value.trim();
+    if (!q || q.length < 3) {
+      showToast('Type at least 3 characters of the parent email', 'error');
+      return;
+    }
+    const resultsBox = document.getElementById('search-results');
+    resultsBox.innerHTML = '<p class="text-muted">Searching...</p>';
+    const result = await searchFamiliesByParentEmail(q);
+    if (!result.success) {
+      resultsBox.innerHTML = `<p class="text-muted">${escapeHtml(result.error || 'No families found')}</p>`;
+      return;
+    }
+    if (result.data.length === 0) {
+      resultsBox.innerHTML = '<p class="text-muted">No families found. Try a different email or use an invite code.</p>';
+      return;
+    }
+    resultsBox.innerHTML = result.data.map(f => `
+      <div class="card" style="margin-bottom: 8px; padding: 14px;">
+        <h3 style="font-family: var(--font-display); margin: 0 0 4px; font-size: 1.1rem;">${escapeHtml(f.name)}</h3>
+        <p class="text-muted" style="font-size: 0.85rem; margin: 0 0 10px;">
+          ${f.parentNames.map(p => escapeHtml(p.name || p.email)).join(', ')}
+        </p>
+        <button class="btn btn-small btn-primary request-join-btn" data-family-id="${f.id}">Request to join</button>
+      </div>
+    `).join('');
+
+    document.querySelectorAll('.request-join-btn').forEach(btn =>
+      btn.addEventListener('click', async () => {
+        showLoading();
+        const r = await requestToJoinFamily(btn.dataset.familyId);
+        hideLoading();
+        if (r.success) {
+          if (r.alreadyPending) showToast('Already requested. Waiting on the parent.', 'info');
+          else showToast('Request sent. The parent will see it on their dashboard.', 'success');
+          // Re-render to show pending state
+          renderSitterOnboarding();
+        } else {
+          showToast(r.error || 'Could not send request', 'error');
+        }
+      }));
   });
 
   document.getElementById('change-role-btn').addEventListener('click', handleChangeRole);
@@ -698,6 +772,10 @@ async function renderParentDashboard() {
   const childrenResult = await getChildren(state.currentFamily.id);
   const children = childrenResult.success ? childrenResult.data : [];
 
+  // Load any pending sitter join requests so the parent sees them up top
+  const reqResult = await listFamilyJoinRequests(state.currentFamily.id);
+  const joinRequests = reqResult.success ? reqResult.data : [];
+
   root.innerHTML = `
     <div class="app-layout">
       <header class="app-header">
@@ -713,9 +791,31 @@ async function renderParentDashboard() {
       <main class="app-content">
         <div class="container">
           <div class="section-header">
-            <h2>Welcome, ${state.userData.name}!</h2>
-            <p>${state.currentFamily.name}</p>
+            <h2>Welcome, ${escapeHtml(state.userData.name)}!</h2>
+            <p>${escapeHtml(state.currentFamily.name)}</p>
           </div>
+
+          ${joinRequests.length ? `
+            <div class="join-requests-banner">
+              <div class="jr-header">
+                <span class="eyebrow">Pending requests</span>
+                <h3>${joinRequests.length} sitter${joinRequests.length === 1 ? '' : 's'} want${joinRequests.length === 1 ? 's' : ''} to join</h3>
+              </div>
+              ${joinRequests.map(r => `
+                <div class="jr-row" data-request-id="${r.id}">
+                  <div class="jr-info">
+                    <strong>${escapeHtml(r.sitterName || 'Sitter')}</strong>
+                    <small>${escapeHtml(r.sitterEmail || '')}</small>
+                    ${r.message ? `<p class="jr-msg">"${escapeHtml(r.message)}"</p>` : ''}
+                  </div>
+                  <div class="jr-actions">
+                    <button class="btn btn-small btn-primary jr-approve" data-request-id="${r.id}">Approve</button>
+                    <button class="btn btn-small btn-outline jr-decline" data-request-id="${r.id}">Decline</button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
 
           <div class="quick-actions">
             <button class="action-btn" id="messages-btn">
@@ -793,6 +893,32 @@ async function renderParentDashboard() {
   document.getElementById('add-child-btn')?.addEventListener('click', () => {
     renderAddChildForm();
   });
+
+  // Sitter join requests: approve / decline
+  document.querySelectorAll('.jr-approve').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await approveJoinRequest(btn.dataset.requestId);
+      hideLoading();
+      if (r.success) {
+        showToast('Sitter added to your family', 'success');
+        renderParentDashboard();
+      } else {
+        showToast(r.error || 'Could not approve', 'error');
+      }
+    }));
+  document.querySelectorAll('.jr-decline').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await declineJoinRequest(btn.dataset.requestId);
+      hideLoading();
+      if (r.success) {
+        showToast('Request declined', 'info');
+        renderParentDashboard();
+      } else {
+        showToast(r.error || 'Could not decline', 'error');
+      }
+    }));
 
   document.getElementById('search-input')?.addEventListener('input', async (e) => {
     if (e.target.value.length < 2) return;

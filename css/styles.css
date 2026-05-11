@@ -1577,6 +1577,67 @@ textarea { min-height: 100px; resize: vertical; }
 .interim-text { font-style: italic; color: var(--color-text-light); margin-top: 8px; }
 
 /* ============================================================================
+   JOIN REQUESTS BANNER (parent dashboard) + SEARCH RESULTS
+   ============================================================================ */
+
+.join-requests-banner {
+  background: white;
+  border: 1.5px solid var(--color-rust);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+.join-requests-banner .jr-header {
+  margin-bottom: 12px;
+}
+.join-requests-banner .jr-header h3 {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 0;
+}
+.join-requests-banner .eyebrow {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.95rem;
+  color: var(--color-rust);
+  display: block;
+  margin-bottom: 2px;
+}
+.jr-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-top: 1px solid var(--color-border);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.jr-row:first-of-type { border-top: 1px solid var(--color-border); }
+.jr-info { flex: 1; min-width: 180px; }
+.jr-info strong {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  display: block;
+}
+.jr-info small {
+  color: var(--color-text-light);
+  font-size: 0.85rem;
+}
+.jr-msg {
+  font-style: italic;
+  font-family: var(--font-display);
+  color: var(--color-ink-soft);
+  margin: 4px 0 0;
+  font-size: 0.92rem;
+}
+.jr-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ============================================================================
    RESPONSIVE
    ============================================================================ */
 

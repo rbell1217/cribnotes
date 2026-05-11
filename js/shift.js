@@ -39,8 +39,12 @@ export async function startShift(familyId, { startTime, shiftType, specials = []
     const expectedHours = SHIFT_TYPES[shiftType]?.hours || 4;
     const contextTags = computeContext(start, shiftType, expectedHours, specials);
 
-    const shiftRef = await db().collection('families').doc(familyId)
-      .collection('shifts').add({
+    const shiftRef = db().collection('families').doc(familyId)
+      .collection('shifts').doc();
+    // Use set() with explicit doc id + awaited write so offline-persistence
+    // doesn't mask a server-side permission-denied. The promise rejects on
+    // real server failure rather than resolving optimistically.
+    await shiftRef.set({
         sitterId: user.uid,
         sitterName: user.displayName || user.email,
         startTime: firebase.firestore.Timestamp.fromDate(start),
