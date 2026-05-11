@@ -51,3 +51,6 @@ config.local.js
 # Generated Firebase config -- created by build/inject-config.js at deploy.
 # Local devs hand-create this file with their dev project's credentials.
 js/config.js
+
+# sed/editor backup files
+*.bak

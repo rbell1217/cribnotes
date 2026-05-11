@@ -109,6 +109,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
+  // Honor "fresh start" flags from landing-page CTAs.
+  // Visiting /app.html?signup=1 always force-signs-out the current Firebase
+  // session and lands the user on the sign-up form. Visiting ?signin=1 does
+  // the same but routes to the login form. Without a flag, a cached session
+  // takes them straight to their dashboard (normal behavior).
+  const url = new URL(window.location.href);
+  const wantsSignup = url.searchParams.has('signup');
+  const wantsSignin = url.searchParams.has('signin');
+  if (wantsSignup || wantsSignin) {
+    state.forceAuthScreen = wantsSignup ? 'signup' : 'signin';
+    // Strip the query so refreshes don't re-trigger
+    url.searchParams.delete('signup');
+    url.searchParams.delete('signin');
+    history.replaceState(null, '', url.toString());
+    // Sign out any cached session before anything else loads
+    try {
+      if (firebase.apps && firebase.apps.length) {
+        await firebase.auth().signOut();
+      }
+    } catch (e) { /* swallow — auth may not be initialized yet */ }
+  }
+
   // Initialize Firebase
   const initialized = initializeFirebase();
   if (!initialized) {
@@ -181,6 +203,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 async function routeApp() {
   dismissBootScreen();
+
+  // If the user arrived with ?signup=1 or ?signin=1 in the URL, honor that
+  // intent before falling through to normal routing. This breaks the
+  // auto-login-back-to-existing-account loop.
+  if (state.forceAuthScreen && !state.currentUser) {
+    if (state.forceAuthScreen === 'signup') {
+      state.forceAuthScreen = null;
+      state.currentScreen = 'auth-signup';
+      renderAuthSignup();
+      return;
+    }
+    state.forceAuthScreen = null;
+    state.currentScreen = 'auth-login';
+    renderAuthLogin();
+    return;
+  }
+
   if (!state.currentUser) {
     // User not logged in
     state.currentScreen = 'auth-login';
