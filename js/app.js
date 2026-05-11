@@ -1908,12 +1908,13 @@ async function renderDictationScreen(childId) {
             </div>
 
             <div id="transcript-display" class="transcript-display" style="min-height: 60px;">
+              <div class="transcript-label">You said</div>
               <p id="final-text" class="final-text" style="white-space: pre-wrap;"></p>
               <p id="interim-text" class="interim-text" style="color: #999; font-style: italic;"></p>
             </div>
 
             <div id="organized-results" style="display: none; margin-top: 1.5rem;">
-              <h4 style="margin-bottom: 0.75rem;">Organized into sections:</h4>
+              <h4 class="organized-heading">Organized for the guide</h4>
               <div id="results-list"></div>
               <div style="display: flex; gap: 8px; margin-top: 1.5rem;">
                 <button class="btn btn-primary" id="save-all-btn" style="flex: 1;">Save All to Guide</button>

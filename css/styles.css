@@ -1580,42 +1580,77 @@ textarea { min-height: 100px; resize: vertical; }
    DICTATION RESULTS CARDS
    ============================================================================ */
 
+/* Label above the raw transcript so the user can tell "what I said"
+   apart from "the cleaned-up organized version" rendered below. */
+.transcript-label {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-light);
+  margin-bottom: 6px;
+}
+.transcript-display {
+  background: var(--color-bone);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  margin-top: 16px;
+}
+.transcript-display .final-text {
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--color-ink);
+  margin: 0;
+}
+.organized-heading {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.35rem;
+  letter-spacing: -0.02em;
+  color: var(--color-ink);
+  margin: 0 0 12px;
+}
+
 .dictation-result-summary {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--color-border);
 }
 .dictation-result-summary strong {
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 1.15rem;
+  font-size: 1.2rem;
   color: var(--color-ink);
 }
 .dictation-result-summary span {
   color: var(--color-text-light);
-  font-size: 0.92rem;
+  font-size: 0.95rem;
 }
 
 .dictation-result-card {
   background: white;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  padding: 14px 18px;
-  margin-bottom: 10px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 2px rgba(26, 26, 26, 0.03);
 }
 .drc-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--color-border);
 }
 .drc-header h4 {
   font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 1.05rem;
+  font-weight: 800;
+  font-size: 1.2rem;
   letter-spacing: -0.01em;
   margin: 0;
   color: var(--color-ink);
@@ -1623,10 +1658,12 @@ textarea { min-height: 100px; resize: vertical; }
 .drc-count {
   background: var(--color-ink);
   color: white;
-  font-size: 0.75rem;
-  padding: 2px 10px;
+  font-size: 0.78rem;
+  padding: 3px 12px;
   border-radius: var(--radius-pill);
   font-weight: 600;
+  min-width: 28px;
+  text-align: center;
 }
 .drc-items {
   list-style: none;
@@ -1634,15 +1671,15 @@ textarea { min-height: 100px; resize: vertical; }
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 }
 .drc-items li {
-  padding: 8px 12px 8px 14px;
+  padding: 12px 14px 12px 16px;
   background: var(--color-bone);
-  border-left: 3px solid var(--color-rust);
-  border-radius: 8px;
-  font-size: 0.93rem;
-  line-height: 1.45;
+  border-left: 4px solid var(--color-rust);
+  border-radius: 10px;
+  font-size: 1.02rem;
+  line-height: 1.5;
   color: var(--color-ink);
 }
 

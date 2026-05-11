@@ -9,7 +9,7 @@
  * Bumped CACHE_VERSION when shipping new versions to invalidate old assets.
  */
 
-const CACHE_VERSION = 'cribnotes-v7';
+const CACHE_VERSION = 'cribnotes-v8';
 // js/config.js is intentionally NOT in the shell -- it holds Firebase
 // credentials and must always be fetched fresh so config changes take effect
 // without forcing the user to clear their cache.
