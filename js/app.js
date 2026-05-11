@@ -204,27 +204,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function routeApp() {
   dismissBootScreen();
 
-  // If the user arrived with ?signup=1 or ?signin=1 in the URL, honor that
-  // intent before falling through to normal routing. This breaks the
-  // auto-login-back-to-existing-account loop.
-  if (state.forceAuthScreen && !state.currentUser) {
+  // While the user is signed out, honor any ?signup=1 / ?signin=1 intent that
+  // arrived in the URL. We DON'T clear the flag after rendering so that the
+  // second routeApp() call (triggered by authStateChanged firing with user=null)
+  // can't override the signup form back to the login form. The flag is only
+  // cleared once the user successfully signs in/up and currentUser becomes set.
+  if (!state.currentUser) {
     if (state.forceAuthScreen === 'signup') {
-      state.forceAuthScreen = null;
       state.currentScreen = 'auth-signup';
       renderAuthSignup();
       return;
     }
-    state.forceAuthScreen = null;
+    // Force-signin and default both end up here
     state.currentScreen = 'auth-login';
     renderAuthLogin();
     return;
   }
 
-  if (!state.currentUser) {
-    // User not logged in
-    state.currentScreen = 'auth-login';
-    renderAuthLogin();
-  } else if (!state.userData) {
+  // User signed in: the force-auth flag has served its purpose. Drop it so
+  // post-login routing isn't affected.
+  state.forceAuthScreen = null;
+
+  if (!state.userData) {
     // User logged in but no profile yet -- wait briefly for it to be created
     // This handles the race condition during signup where auth fires before Firestore write completes
     state.currentScreen = 'auth-loading';
@@ -565,8 +566,10 @@ async function handleChangeRole() {
   const result = await setUserRole(null);
   if (result.success) {
     state.userData.role = null;
+    state.currentFamily = null;
+    state.activeShift = null;
     hideLoading();
-    renderRoleSelect();
+    await routeApp();
   } else {
     showToast(result.error || 'Failed to change role', 'error');
     hideLoading();
@@ -2890,8 +2893,36 @@ function renderParentSettings() {
     <button class="btn btn-full" onclick="renderProfileSettings()">Profile</button>
     <button class="btn btn-full" onclick="renderSitterPermissionsScreen()">Sitter Permissions</button>
     <button class="btn btn-full" onclick="renderShiftHistoryScreen()">Shift History</button>
+    <button class="btn btn-full" onclick="switchFamilyOrRole()" style="background: var(--color-clay); color: white;">Switch family or role</button>
     <button class="btn btn-outline btn-full" onclick="handleLogout()">Sign Out</button>
   `);
+}
+
+/**
+ * Resets the user's role + family so they re-enter the split-screen onboarding.
+ * Used by the dashboard "Switch family or role" buttons across the app.
+ */
+async function switchFamilyOrRole() {
+  closeModal();
+  if (!confirm('Switch family or role? You will return to onboarding where you can pick a different role, search for a family, or invite a sitter. Your existing family data is preserved.')) return;
+  showLoading();
+  try {
+    const firestore = getFirestore();
+    await firestore.collection('users').doc(state.currentUser.uid).update({
+      role: null,
+      familyId: null
+    });
+    state.userData.role = null;
+    state.userData.familyId = null;
+    state.currentFamily = null;
+    state.activeShift = null;
+    state.contextTags = [];
+    hideLoading();
+    await routeApp();
+  } catch (err) {
+    hideLoading();
+    showToast('Could not switch: ' + err.message, 'error');
+  }
 }
 
 async function renderInviteSitterScreen() {
@@ -3186,9 +3217,11 @@ async function switchProfile() {
       state.userData.role = null;
       state.userData.familyId = null;
       state.currentFamily = null;
+      state.activeShift = null;
+      state.contextTags = [];
 
       hideLoading();
-      renderRoleSelect();
+      await routeApp();
     } catch (err) {
       hideLoading();
       showToast('Failed to switch role: ' + err.message, 'error');
@@ -3392,7 +3425,10 @@ function renderShiftStartScreen() {
     <div class="app-layout">
       <header class="app-header">
         <h1 class="header-title">Start Shift</h1>
-        <button class="btn btn-outline btn-small" id="logout-btn">Sign out</button>
+        <div class="header-right" style="gap: 8px;">
+          <button class="btn btn-outline btn-small" id="switch-family-btn">Switch family / role</button>
+          <button class="btn btn-outline btn-small" id="logout-btn">Sign out</button>
+        </div>
       </header>
       <main class="app-content">
         <div class="container container-small">
@@ -3496,6 +3532,28 @@ function renderShiftStartScreen() {
   });
 
   document.getElementById('logout-btn').addEventListener('click', handleLogout);
+
+  document.getElementById('switch-family-btn')?.addEventListener('click', async () => {
+    if (!confirm('Switch family or role? This will return you to onboarding where you can pick a different role, search for a family, or invite a sitter.')) return;
+    showLoading();
+    try {
+      const firestore = getFirestore();
+      await firestore.collection('users').doc(state.currentUser.uid).update({
+        role: null,
+        familyId: null
+      });
+      state.userData.role = null;
+      state.userData.familyId = null;
+      state.currentFamily = null;
+      state.activeShift = null;
+      state.contextTags = [];
+      hideLoading();
+      await routeApp();
+    } catch (err) {
+      hideLoading();
+      showToast('Could not switch: ' + err.message, 'error');
+    }
+  });
 }
 
 /**
@@ -4421,6 +4479,7 @@ window.renderEditCriticalInfoForm = renderEditCriticalInfoForm;
 window.renderSitterPermissionsScreen = renderSitterPermissionsScreen;
 window.renderShiftHistoryScreen = renderShiftHistoryScreen;
 window.renderInviteSitterScreen = renderInviteSitterScreen;
+window.switchFamilyOrRole = switchFamilyOrRole;
 window.enablePushFromSettings = enablePushFromSettings;
 window.recordDoseFromUI = recordDoseFromUI;
 window.removeMedicationConfirm = removeMedicationConfirm;
