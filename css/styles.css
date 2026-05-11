@@ -1577,6 +1577,68 @@ textarea { min-height: 100px; resize: vertical; }
 .interim-text { font-style: italic; color: var(--color-text-light); margin-top: 8px; }
 
 /* ============================================================================
+   AVATARS (user + child profile photos)
+   ============================================================================ */
+
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+}
+.avatar-emoji {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+/* In child-card, the avatar wrapper is a 64x64 circle. The image fills it. */
+.child-card .child-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-pill);
+  background: var(--color-sand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.child-card .child-avatar img.avatar-img { border-radius: 0; }
+
+/* Profile / edit modals — bigger circular preview with upload buttons next to it */
+.profile-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: var(--spacing-md);
+  padding: 14px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.profile-avatar-preview {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--color-sand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.profile-avatar-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.profile-avatar-preview span { font-size: 2rem; }
+.profile-avatar-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+/* ============================================================================
    SPLIT-SCREEN ONBOARDING
    ============================================================================ */
 

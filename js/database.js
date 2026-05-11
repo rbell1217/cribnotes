@@ -604,6 +604,90 @@ export async function enableOfflinePersistence() {
 }
 
 /**
+ * Avatar / Profile Photo uploads
+ * ---------------------------------------------
+ * Uploads to Firebase Storage at:
+ *   - /avatars/users/{uid}.{ext}              (user profile photo)
+ *   - /avatars/families/{fid}/children/{cid}.{ext}  (child photo)
+ * Returns a download URL that we also persist on the user / child Firestore doc
+ * so the UI can render the avatar without hitting Storage SDK on every render.
+ */
+
+/**
+ * Resize an image file to a square avatar (default 256px) on the client and
+ * return a base64 data URL. We do this on the client so we can:
+ *   - Avoid the Firebase Storage upgrade requirement (Spark-plan friendly).
+ *   - Keep avatar payload under Firestore's 1MB-per-doc limit even for
+ *     full-res phone photos.
+ */
+async function resizeImageToDataUrl(file, size = 256, quality = 0.82) {
+  if (!file.type.startsWith('image/')) throw new Error('Must be an image');
+  if (file.size > 10 * 1024 * 1024) throw new Error('Max 10MB');
+  const bitmap = await createImageBitmap(file);
+  // Source square crop: take the largest center square of the original
+  const srcSize = Math.min(bitmap.width, bitmap.height);
+  const sx = (bitmap.width - srcSize) / 2;
+  const sy = (bitmap.height - srcSize) / 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, sx, sy, srcSize, srcSize, 0, 0, size, size);
+  const dataUrl = canvas.toDataURL('image/jpeg', quality);
+  // Firestore doc limit is 1MB; a 256x256 JPEG at q=0.82 is comfortably <100KB.
+  // Guard anyway with a clear error so callers can show a useful message.
+  if (dataUrl.length > 900 * 1024) throw new Error('Image too large after resize');
+  return dataUrl;
+}
+
+export async function uploadUserAvatar(file) {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    if (!file) throw new Error('No file');
+
+    const dataUrl = await resizeImageToDataUrl(file);
+    await db().collection('users').doc(user.uid).update({ avatar: dataUrl });
+    return { success: true, url: dataUrl };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function uploadChildAvatar(familyId, childId, file) {
+  try {
+    if (!file) throw new Error('No file');
+    const dataUrl = await resizeImageToDataUrl(file);
+    await db().collection('families').doc(familyId)
+      .collection('children').doc(childId).update({ avatar: dataUrl });
+    return { success: true, url: dataUrl };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function removeUserAvatar() {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    await db().collection('users').doc(user.uid).update({ avatar: null });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function removeChildAvatar(familyId, childId) {
+  try {
+    await db().collection('families').doc(familyId)
+      .collection('children').doc(childId).update({ avatar: null });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Family search + bidirectional join requests
  * ---------------------------------------------
  * A sitter can search for families by parent email or family name and request

@@ -27,7 +27,8 @@ import {
   approveJoinRequest, declineJoinRequest,
   searchSittersByEmail, inviteSitterByEmail,
   listMyFamilyInvites, listFamilyInvitesSent,
-  acceptFamilyInvite, declineFamilyInvite, cancelFamilyInvite
+  acceptFamilyInvite, declineFamilyInvite, cancelFamilyInvite,
+  uploadUserAvatar, uploadChildAvatar, removeUserAvatar, removeChildAvatar
 } from './database.js';
 
 import {
@@ -1314,10 +1315,13 @@ async function renderParentDashboard() {
               <div class="children-grid">
                 ${children.map(child => `
                   <div class="child-card" data-child-id="${child.id}">
-                    <div class="child-avatar">${child.avatar || '👶'}</div>
-                    <h4>${child.name}</h4>
-                    <p>Age ${child.age}</p>
-                    <button class="btn btn-small btn-outline" onclick="viewChildGuide('${child.id}')">View Guide</button>
+                    <div class="child-avatar">${renderAvatarHtml(child.avatar, '👶')}</div>
+                    <h4>${escapeHtml(child.name)}</h4>
+                    <p>Age ${escapeHtml(String(child.age))}</p>
+                    <div style="display: flex; gap: 6px;">
+                      <button class="btn btn-small btn-outline" onclick="viewChildGuide('${child.id}')">View Guide</button>
+                      <button class="btn btn-small btn-outline" onclick="renderEditChildForm('${child.id}')">Edit</button>
+                    </div>
                   </div>
                 `).join('')}
               </div>
@@ -1492,7 +1496,7 @@ async function renderSitterDashboard() {
               <div class="children-grid">
                 ${children.map(child => `
                   <div class="child-card" data-child-id="${child.id}">
-                    <div class="child-avatar">${child.avatar || '👶'}</div>
+                    <div class="child-avatar">${renderAvatarHtml(child.avatar, '👶')}</div>
                     <h4>${escapeHtml(child.name)}</h4>
                     <p>Age ${escapeHtml(String(child.age))}</p>
                     <button class="btn btn-small btn-primary" onclick="viewChildGuide('${child.id}')">View Care Guide</button>
@@ -3166,19 +3170,58 @@ async function enablePushFromSettings() {
 }
 
 function renderProfileSettings() {
+  const av = state.userData.avatar;
   showModal(`
     <h3>Profile</h3>
-    <p><strong>Name:</strong> ${state.userData.name}</p>
-    <p><strong>Email:</strong> ${state.userData.email}</p>
+
+    <div class="profile-avatar-row">
+      <div class="profile-avatar-preview" id="profile-avatar-preview">
+        ${av ? `<img src="${escapeHtml(av)}" alt="">` : '<span>👤</span>'}
+      </div>
+      <div class="profile-avatar-controls">
+        <input type="file" id="profile-avatar-input" accept="image/*" style="display:none">
+        <button class="btn btn-small btn-primary" onclick="document.getElementById('profile-avatar-input').click()">${av ? 'Change photo' : 'Upload photo'}</button>
+        ${av ? `<button class="btn btn-small btn-outline" onclick="handleRemoveUserAvatar()">Remove</button>` : ''}
+      </div>
+    </div>
+
+    <p><strong>Name:</strong> ${escapeHtml(state.userData.name)}</p>
+    <p><strong>Email:</strong> ${escapeHtml(state.userData.email)}</p>
     <p><strong>Role:</strong> ${state.userData.role === 'parent' ? 'Parent/Guardian' : 'Babysitter'}</p>
     <hr style="margin: 16px 0;">
-    <button class="btn btn-outline btn-full" onclick="switchProfile()" style="color: #e76f51; border-color: #e76f51;">
+    <button class="btn btn-outline btn-full" onclick="switchProfile()" style="color: var(--color-rust); border-color: var(--color-rust);">
       Switch Role
     </button>
-    <p style="font-size: 0.8em; color: #999; margin-top: 8px; text-align: center;">
+    <p style="font-size: 0.8em; color: var(--color-text-light); margin-top: 8px; text-align: center;">
       Change between Parent and Babysitter profiles
     </p>
   `);
+
+  document.getElementById('profile-avatar-input')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    showLoading();
+    const r = await uploadUserAvatar(file);
+    hideLoading();
+    if (r.success) {
+      state.userData.avatar = r.url;
+      showToast('Photo updated', 'success');
+      renderProfileSettings();
+    } else {
+      showToast(r.error || 'Upload failed', 'error');
+    }
+  });
+}
+
+async function handleRemoveUserAvatar() {
+  showLoading();
+  const r = await removeUserAvatar();
+  hideLoading();
+  if (r.success) {
+    state.userData.avatar = null;
+    showToast('Photo removed', 'info');
+    renderProfileSettings();
+  } else showToast(r.error || 'Failed', 'error');
 }
 
 function copyInviteCode() {
@@ -3247,23 +3290,90 @@ async function handleLogout() {
 function renderAddChildForm() {
   showModal(`
     <h3>Add Child</h3>
-    <input type="text" id="child-name" placeholder="Name" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 12px;">
-    <input type="number" id="child-age" placeholder="Age" min="0" max="18" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 12px;">
+    <div class="profile-avatar-row">
+      <div class="profile-avatar-preview" id="new-child-avatar-preview"><span>👶</span></div>
+      <div class="profile-avatar-controls">
+        <input type="file" id="new-child-avatar-input" accept="image/*" style="display:none">
+        <button class="btn btn-small btn-primary" type="button" onclick="document.getElementById('new-child-avatar-input').click()">Pick photo</button>
+        <span style="font-size: 0.85rem; color: var(--color-text-light);">Optional. Upload after creating.</span>
+      </div>
+    </div>
+    <input type="text" id="child-name" class="form-input" placeholder="Name">
+    <input type="number" id="child-age" class="form-input" placeholder="Age" min="0" max="18">
     <div style="display: flex; gap: 8px; margin-top: 16px;">
       <button class="btn btn-primary" onclick="saveChild()">Add</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
     </div>
   `);
+  // Preview chosen file before save so the parent sees what they picked
+  document.getElementById('new-child-avatar-input')?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const preview = document.getElementById('new-child-avatar-preview');
+    if (preview) preview.innerHTML = `<img src="${URL.createObjectURL(file)}" alt="">`;
+  });
 }
 
-function renderEditChildForm(childId) {
-  // Quick edit form
-  renderAddChildForm();
+async function renderEditChildForm(childId) {
+  const child = await getChild(state.currentFamily.id, childId);
+  if (!child.success) { showToast('Could not load child', 'error'); return; }
+  const c = child.data;
+  showModal(`
+    <h3>Edit ${escapeHtml(c.name)}</h3>
+    <div class="profile-avatar-row">
+      <div class="profile-avatar-preview" id="edit-child-avatar-preview">
+        ${c.avatar ? `<img src="${escapeHtml(c.avatar)}" alt="">` : '<span>👶</span>'}
+      </div>
+      <div class="profile-avatar-controls">
+        <input type="file" id="edit-child-avatar-input" accept="image/*" style="display:none">
+        <button class="btn btn-small btn-primary" type="button" onclick="document.getElementById('edit-child-avatar-input').click()">${c.avatar ? 'Change photo' : 'Upload photo'}</button>
+        ${c.avatar ? `<button class="btn btn-small btn-outline" type="button" onclick="handleRemoveChildAvatar('${childId}')">Remove</button>` : ''}
+      </div>
+    </div>
+    <input type="text" id="edit-child-name" class="form-input" value="${escapeHtml(c.name)}" placeholder="Name">
+    <input type="number" id="edit-child-age" class="form-input" value="${escapeHtml(String(c.age))}" placeholder="Age" min="0" max="18">
+    <div style="display: flex; gap: 8px; margin-top: 16px;">
+      <button class="btn btn-primary" onclick="saveEditedChild('${childId}')">Save</button>
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+  document.getElementById('edit-child-avatar-input')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    showLoading();
+    const r = await uploadChildAvatar(state.currentFamily.id, childId, file);
+    hideLoading();
+    if (r.success) {
+      showToast('Photo updated', 'success');
+      renderEditChildForm(childId);
+    } else showToast(r.error || 'Upload failed', 'error');
+  });
+}
+
+async function handleRemoveChildAvatar(childId) {
+  showLoading();
+  const r = await removeChildAvatar(state.currentFamily.id, childId);
+  hideLoading();
+  if (r.success) { showToast('Photo removed', 'info'); renderEditChildForm(childId); }
+  else showToast(r.error || 'Failed', 'error');
+}
+
+async function saveEditedChild(childId) {
+  const name = document.getElementById('edit-child-name')?.value;
+  const age = parseInt(document.getElementById('edit-child-age')?.value || 0);
+  if (!name || age < 0) { showToast('Name and age required', 'error'); return; }
+  showLoading();
+  closeModal();
+  const r = await updateChild(state.currentFamily.id, childId, { name, age });
+  hideLoading();
+  if (r.success) { showToast('Saved', 'success'); renderParentDashboard(); }
+  else showToast(r.error || 'Could not save', 'error');
 }
 
 async function saveChild() {
   const name = document.getElementById('child-name')?.value;
   const age = parseInt(document.getElementById('child-age')?.value || 0);
+  const file = document.getElementById('new-child-avatar-input')?.files?.[0];
 
   if (!name || age < 0) {
     showToast('Please enter name and age', 'error');
@@ -3277,10 +3387,18 @@ async function saveChild() {
   if (!result.success) {
     showToast(result.error, 'error');
     hideLoading();
-  } else {
-    showToast('Child added', 'success');
-    renderParentDashboard();
+    return;
   }
+
+  // If the parent picked a photo, upload it now that we have a child id
+  if (file) {
+    const up = await uploadChildAvatar(state.currentFamily.id, result.childId, file);
+    if (!up.success) showToast('Child added but photo upload failed: ' + up.error, 'error');
+  }
+
+  hideLoading();
+  showToast('Child added', 'success');
+  renderParentDashboard();
 }
 
 // ============================================================================
@@ -4429,6 +4547,15 @@ function applyContextFilter(guide) {
 // HELPERS
 // ============================================================================
 
+// Render an avatar: either an image when a URL is available, or a fallback emoji.
+// Always escaped — URL goes through escapeHtml so XSS via avatar field is impossible.
+function renderAvatarHtml(url, fallbackEmoji = '👤') {
+  if (url && typeof url === 'string') {
+    return `<img src="${escapeHtml(url)}" alt="" class="avatar-img">`;
+  }
+  return `<span class="avatar-emoji">${fallbackEmoji}</span>`;
+}
+
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
@@ -4480,6 +4607,10 @@ window.renderSitterPermissionsScreen = renderSitterPermissionsScreen;
 window.renderShiftHistoryScreen = renderShiftHistoryScreen;
 window.renderInviteSitterScreen = renderInviteSitterScreen;
 window.switchFamilyOrRole = switchFamilyOrRole;
+window.handleRemoveUserAvatar = handleRemoveUserAvatar;
+window.handleRemoveChildAvatar = handleRemoveChildAvatar;
+window.saveEditedChild = saveEditedChild;
+window.renderEditChildForm = renderEditChildForm;
 window.enablePushFromSettings = enablePushFromSettings;
 window.recordDoseFromUI = recordDoseFromUI;
 window.removeMedicationConfirm = removeMedicationConfirm;
