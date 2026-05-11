@@ -17,14 +17,14 @@ const API_ENDPOINT = '/api/organize';
  * @param {string} transcript - The raw text to process
  * @param {string} childName - The child's name
  * @param {string} source - 'dictation' or 'document'
- * Returns: { sections: { sectionKey: ["polished item", ...], ... } }
+ * Returns: { sections: { sectionKey: [...] }, critical?: {...} }
  */
 export async function processTranscript(transcript, childName, source = 'dictation') {
   const isDocument = source === 'document';
 
   // Try AI processing first
   try {
-    const result = await processWithAI(transcript, childName, isDocument);
+    const result = await processWithAI(transcript, childName, { isDocument });
     if (result && result.sections && Object.keys(result.sections).length > 0) {
       console.log('[CribNotes] AI processing succeeded');
       return result;
@@ -41,13 +41,41 @@ export async function processTranscript(transcript, childName, source = 'dictati
 }
 
 /**
+ * Process a checklist dictation into { title, items }.
+ * Falls back to a simple line-split when the AI is unavailable.
+ */
+export async function processChecklistDictation(transcript, childName) {
+  try {
+    const result = await processWithAI(transcript, childName, { mode: 'checklist' });
+    if (result && Array.isArray(result.items) && result.items.length > 0) {
+      return { title: result.title || '', items: result.items };
+    }
+  } catch (err) {
+    console.log('[CribNotes] Checklist AI unavailable:', err.message);
+  }
+  // Local fallback: split on sentence/comma boundaries, imperative-ish trim.
+  const items = (transcript || '')
+    .split(/[.!?;\n]+|,\s*(?=[A-Z])/g)
+    .map(s => s.trim().replace(/^(and|also|then|next|plus)\s+/i, ''))
+    .filter(s => s.split(/\s+/).length >= 2)
+    .map(s => s.charAt(0).toUpperCase() + s.slice(1));
+  return { title: '', items };
+}
+
+/**
  * AI-powered processing via serverless function
  */
-async function processWithAI(transcript, childName, isDocument) {
+async function processWithAI(transcript, childName, opts) {
+  const body = {
+    transcript,
+    childName,
+    isDocument: !!(opts && opts.isDocument),
+  };
+  if (opts && opts.mode) body.mode = opts.mode;
   const response = await fetch(API_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript, childName, isDocument })
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) throw new Error(`API returned ${response.status}`);

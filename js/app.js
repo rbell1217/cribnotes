@@ -36,7 +36,7 @@ import {
   startDictation, stopDictation, abortDictation
 } from './dictation.js';
 
-import { processTranscript } from './textProcessor.js';
+import { processTranscript, processChecklistDictation } from './textProcessor.js';
 
 import { isFirebaseConfigured } from './config.js';
 
@@ -2060,6 +2060,7 @@ async function renderDictationScreen(childId) {
   let isRecording = false;
   let finalTranscript = '';
   let organizedItems = {};
+  let organizedCritical = null;
 
   const startBtn = document.getElementById('start-btn');
   const stopBtn = document.getElementById('stop-btn');
@@ -2141,6 +2142,7 @@ async function renderDictationScreen(childId) {
       console.log('[CribNotes] Processed result:', JSON.stringify(result));
 
       organizedItems = result.sections || {};
+      organizedCritical = result.critical || null;
 
       if (Object.keys(organizedItems).length === 0) {
         resultsList.innerHTML = `<p style="color: #666; text-align: center;">Could not organize the text. Try dictating again with more detail.</p>`;
@@ -2151,11 +2153,13 @@ async function renderDictationScreen(childId) {
       // If an item is shaped like "Label: value", render the label in bold so
       // sitters can scan the card at a glance.
       const totalCount = Object.values(organizedItems).reduce((s, arr) => s + arr.length, 0);
+      const criticalBlock = renderCriticalPreview(organizedCritical);
       resultsList.innerHTML = `
         <div class="dictation-result-summary">
           <strong>${totalCount} note${totalCount === 1 ? '' : 's'}</strong>
           <span>across ${Object.keys(organizedItems).length} section${Object.keys(organizedItems).length === 1 ? '' : 's'}</span>
         </div>
+        ${criticalBlock}
         ${Object.entries(organizedItems).map(([section, items]) => `
           <div class="dictation-result-card">
             <div class="drc-header">
@@ -2218,6 +2222,19 @@ async function renderDictationScreen(childId) {
       }
     }
 
+    // Promote any critical facts (allergies, current meds, emergency contacts,
+    // pediatrician, blood type) into the child's pinned Critical Info card so
+    // they show up on the always-visible card, not just in the section list.
+    let criticalSaved = 0;
+    if (organizedCritical && typeof organizedCritical === 'object') {
+      try {
+        const merged = await mergeCriticalIntoChild(state.currentFamily.id, childId, organizedCritical);
+        criticalSaved = merged.count || 0;
+      } catch (err) {
+        console.error('[CribNotes] Critical merge failed:', err);
+      }
+    }
+
     hideLoading();
     if (savedCount === 0 && errorCount > 0) {
       // All failed - stay on page so user can see error and retry
@@ -2226,7 +2243,8 @@ async function renderDictationScreen(childId) {
       showToast(`Saved ${savedCount}, ${errorCount} failed`, 'error');
       setTimeout(() => viewChildGuide(childId), 2000);
     } else {
-      showToast(`Saved ${savedCount} items to guide!`, 'success');
+      const criticalNote = criticalSaved ? ` + ${criticalSaved} pinned to Critical Info` : '';
+      showToast(`Saved ${savedCount} items to guide${criticalNote}!`, 'success');
       setTimeout(() => viewChildGuide(childId), 1500);
     }
   });
@@ -2748,15 +2766,80 @@ async function deleteChecklistConfirm(childId, checklistId) {
 }
 
 function renderAddChecklistForm(childId) {
+  const canDictate = isSpeechRecognitionAvailable();
   showModal(`
     <h3>Create Checklist</h3>
-    <input type="text" id="checklist-title" placeholder="List name" style="width: 100%; margin-bottom: 12px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-    <textarea id="checklist-items" rows="6" placeholder="One item per line" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+    <input type="text" id="checklist-title" class="form-input" placeholder="List name" style="margin-bottom: 12px;">
+    <textarea id="checklist-items" rows="6" class="form-input" placeholder="One item per line"></textarea>
+    ${canDictate ? `
+      <div style="margin-top: 12px;">
+        <button type="button" class="btn btn-outline" id="dictate-checklist-btn" style="width: 100%;">
+          🎤 Dictate items
+        </button>
+        <div id="dictate-checklist-status" style="display:none; margin-top: 8px; padding: 10px 12px; background: var(--color-bone); border-radius: 8px; font-size: 0.9em;"></div>
+      </div>
+    ` : ''}
     <div style="display: flex; gap: 8px; margin-top: 16px;">
       <button class="btn btn-primary" onclick="saveChecklist('${childId}')">Create</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
     </div>
   `);
+
+  if (canDictate) {
+    let dictating = false;
+    const btn = document.getElementById('dictate-checklist-btn');
+    const status = document.getElementById('dictate-checklist-status');
+    const titleInput = document.getElementById('checklist-title');
+    const itemsInput = document.getElementById('checklist-items');
+
+    btn?.addEventListener('click', async () => {
+      if (dictating) {
+        stopDictation();
+        return;
+      }
+      dictating = true;
+      btn.textContent = '⏹ Stop dictation';
+      btn.classList.remove('btn-outline');
+      btn.classList.add('btn-primary');
+      btn.style.background = '#c0392b';
+      btn.style.borderColor = '#c0392b';
+      status.style.display = 'block';
+      status.textContent = 'Listening… talk through the items you want on the list.';
+      try {
+        const result = await startDictation();
+        const transcript = result?.transcript || '';
+        if (!transcript.trim()) {
+          status.textContent = 'No speech detected. Try again.';
+          dictating = false;
+          btn.textContent = '🎤 Dictate items';
+          btn.classList.remove('btn-primary');
+          btn.classList.add('btn-outline');
+          btn.style.background = '';
+          btn.style.borderColor = '';
+          return;
+        }
+        status.textContent = 'Organizing into a checklist…';
+        const organized = await processChecklistDictation(transcript, '');
+        if (organized.title && !titleInput.value.trim()) {
+          titleInput.value = organized.title;
+        }
+        const existing = (itemsInput.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+        const combined = existing.concat(organized.items || []);
+        itemsInput.value = combined.join('\n');
+        status.textContent = `Added ${organized.items?.length || 0} item${(organized.items?.length || 0) === 1 ? '' : 's'}. Edit anything that looks off and tap Create.`;
+      } catch (err) {
+        console.error('[CribNotes] Checklist dictation failed:', err);
+        status.textContent = 'Could not capture audio: ' + (err.message || 'unknown error');
+      } finally {
+        dictating = false;
+        btn.textContent = '🎤 Dictate items';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-outline');
+        btn.style.background = '';
+        btn.style.borderColor = '';
+      }
+    });
+  }
 }
 
 async function saveChecklist(childId) {
@@ -4739,6 +4822,131 @@ function renderGuideItemTextHtml(text) {
     return `<span class="drc-label">${escapeHtml(m[1])}</span>${escapeHtml(m[2])}`;
   }
   return escapeHtml(text || '');
+}
+
+/**
+ * Renders a "Critical Info detected" preview card shown above the section
+ * cards on the dictation results screen. Lets the parent see (and re-confirm)
+ * what will be pinned to the Critical Info card on save.
+ */
+function renderCriticalPreview(critical) {
+  if (!critical || typeof critical !== 'object') return '';
+  const rows = [];
+  if (Array.isArray(critical.allergies) && critical.allergies.length) {
+    rows.push({
+      label: 'Allergies',
+      value: critical.allergies.map(a => {
+        const name = a.allergen || a.name || a;
+        const sev = a.severity ? ` (${a.severity})` : '';
+        return escapeHtml(String(name) + sev);
+      }).join(', '),
+    });
+  }
+  if (Array.isArray(critical.medications) && critical.medications.length) {
+    rows.push({
+      label: 'Current meds',
+      value: critical.medications.map(m => {
+        const name = m.name || m;
+        const dose = m.dose ? `, ${m.dose}` : '';
+        return escapeHtml(String(name) + dose);
+      }).join(', '),
+    });
+  }
+  if (Array.isArray(critical.emergencyContacts) && critical.emergencyContacts.length) {
+    rows.push({
+      label: 'Emergency contacts',
+      value: critical.emergencyContacts.map(c => {
+        const rel = c.relationship ? ` (${c.relationship})` : '';
+        return escapeHtml(`${c.name || ''}${rel}${c.phone ? `, ${c.phone}` : ''}`);
+      }).join(' · '),
+    });
+  }
+  if (critical.pediatrician && (critical.pediatrician.name || critical.pediatrician.phone)) {
+    const p = critical.pediatrician;
+    rows.push({
+      label: 'Pediatrician',
+      value: escapeHtml(`${p.name || ''}${p.phone ? `, ${p.phone}` : ''}`),
+    });
+  }
+  if (critical.bloodType) {
+    rows.push({ label: 'Blood type', value: escapeHtml(critical.bloodType) });
+  }
+  if (rows.length === 0) return '';
+  return `
+    <div class="critical-preview">
+      <div class="critical-preview-header">
+        <span>🛡️</span>
+        <strong>Critical info detected</strong>
+        <span class="critical-preview-tag">Will be pinned to Critical Info</span>
+      </div>
+      <ul>
+        ${rows.map(r => `<li><span class="drc-label">${escapeHtml(r.label)}</span>${r.value}</li>`).join('')}
+      </ul>
+    </div>
+  `;
+}
+
+/**
+ * Merge AI-extracted critical info into the child's existing critical doc.
+ * De-dupes by a stable key per field so re-dictating the same fact doesn't
+ * create a duplicate row on the Critical Info card.
+ * Returns { count } = number of newly added items across all fields.
+ */
+async function mergeCriticalIntoChild(familyId, childId, critical) {
+  const existing = await getCriticalInfo(familyId, childId);
+  const cur = (existing.success && existing.data) ? existing.data : {};
+  const updates = {};
+  let added = 0;
+
+  const dedupeAdd = (existingArr, incoming, keyFn) => {
+    const seen = new Set((existingArr || []).map(keyFn).filter(Boolean));
+    const out = (existingArr || []).slice();
+    for (const item of incoming) {
+      const k = keyFn(item);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push(item);
+      added++;
+    }
+    return out;
+  };
+
+  if (Array.isArray(critical.allergies) && critical.allergies.length) {
+    updates.allergies = dedupeAdd(
+      cur.allergies,
+      critical.allergies.map(a => typeof a === 'string' ? { allergen: a } : a),
+      a => String(a.allergen || a.name || '').toLowerCase().trim()
+    );
+  }
+  if (Array.isArray(critical.medications) && critical.medications.length) {
+    updates.medications = dedupeAdd(
+      cur.medications,
+      critical.medications.map(m => typeof m === 'string' ? { name: m } : m),
+      m => String(m.name || '').toLowerCase().trim()
+    );
+  }
+  if (Array.isArray(critical.emergencyContacts) && critical.emergencyContacts.length) {
+    updates.emergencyContacts = dedupeAdd(
+      cur.emergencyContacts,
+      critical.emergencyContacts,
+      c => String(c.phone || c.name || '').toLowerCase().replace(/\D/g, '').trim() || String(c.name || '').toLowerCase()
+    );
+  }
+  if (critical.pediatrician && (critical.pediatrician.name || critical.pediatrician.phone)) {
+    const existingPed = cur.pediatrician || {};
+    if (!existingPed.name && !existingPed.phone) {
+      updates.pediatrician = critical.pediatrician;
+      added++;
+    }
+  }
+  if (critical.bloodType && !cur.bloodType) {
+    updates.bloodType = critical.bloodType;
+    added++;
+  }
+
+  if (Object.keys(updates).length === 0) return { count: 0 };
+  await updateCriticalInfo(familyId, childId, updates);
+  return { count: added };
 }
 
 // Make global functions available

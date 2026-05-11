@@ -23,18 +23,27 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'API key not configured' });
   }
 
-  const { transcript, childName, isDocument } = req.body;
+  const { transcript, childName, isDocument, mode } = req.body;
   if (!transcript) {
     return res.status(400).json({ error: 'No transcript provided' });
   }
 
-  // Use different prompts for documents vs dictation
-  const prompt = isDocument
-    ? buildDocumentPrompt(transcript, childName)
-    : buildDictationPrompt(transcript, childName);
-
-  // Documents need more tokens since they contain more structured content
-  const maxTokens = isDocument ? 8192 : 2048;
+  // Three prompt modes:
+  //   - 'checklist'  : flat to-do list (no sections)
+  //   - 'document'   : structured doc, preserve wording
+  //   - default      : free-form dictation -> sections + critical info
+  let prompt;
+  let maxTokens;
+  if (mode === 'checklist') {
+    prompt = buildChecklistPrompt(transcript, childName);
+    maxTokens = 1024;
+  } else if (isDocument) {
+    prompt = buildDocumentPrompt(transcript, childName);
+    maxTokens = 8192;
+  } else {
+    prompt = buildDictationPrompt(transcript, childName);
+    maxTokens = 2048;
+  }
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -168,8 +177,38 @@ Sections:
 
 IMPORTANT: Only include a section in your response if the transcript contains relevant information for it. Skip sections with no relevant content.
 
+ALSO EXTRACT CRITICAL INFO. If the transcript mentions any of these high-stakes facts, return them in a "critical" object at the top level so they get pinned to the always-visible Critical Info card:
+- Allergies: each as {"allergen": "Peanuts", "severity": "severe" | "moderate" | "mild" (if stated), "reaction": "...", "treatment": "Epinephrine, then call 911"} — severity/reaction/treatment optional
+- Current medications: each as {"name": "Albuterol inhaler", "dose": "2 puffs", "schedule": "before exercise"} — dose/schedule optional
+- Emergency contacts: each as {"name": "Aunt Ariel", "relationship": "Aunt", "phone": "401-225-3961"} — relationship optional
+- Pediatrician: {"name": "Dr. Smith", "phone": "..."}
+- Blood type: "O+"
+
+Always include the same facts in the relevant guide section AND in the critical block. A peanut allergy should appear in both "meals" (or "medicalInfo") and in critical.allergies. An emergency contact phone number should appear in both "emergencyContacts" and critical.emergencyContacts.
+
+Respond in this exact JSON format (no markdown, no code fences). Omit "critical" if nothing critical was mentioned, and omit any field inside critical that wasn't mentioned:
+{"sections":{"sectionKey":["Label: value"]},"critical":{"allergies":[{"allergen":"Peanuts","severity":"severe"}],"medications":[{"name":"...","dose":"..."}],"emergencyContacts":[{"name":"...","phone":"...","relationship":"..."}],"pediatrician":{"name":"...","phone":"..."},"bloodType":"O+"}}
+
+Raw transcript:
+"""
+${text}
+"""`;
+}
+
+function buildChecklistPrompt(text, childName) {
+  return `You are turning a parent's spoken description of a list into a clean, actionable checklist for a babysitter${childName ? ` taking care of ${childName}` : ''}.
+
+The parent dictated this aloud, so it may include filler words, repetition, and rambling. Your job:
+1. Suggest a short title for the list (3-5 words, Title Case). Examples: "Morning Routine", "Park Bag", "Bedtime Steps"
+2. Extract each distinct action item as a short, scannable instruction
+3. Each item should be ONE action — split compound sentences into multiple items
+4. Use imperative voice ("Pack sunscreen", not "Make sure you pack sunscreen")
+5. Preserve specific details (amounts, times, locations, names)
+6. Order items in the natural sequence the parent described (or chronological for routines)
+7. Aim for 3-15 items; if the parent gave fewer that's fine
+
 Respond in this exact JSON format (no markdown, no code fences):
-{"sections":{"sectionKey":["Label: value","Another label: another value"],"anotherKey":["Label: value"]}}
+{"title":"Morning Routine","items":["Pack sunscreen","Bring two bottles of water","Drop off at park by 10 AM"]}
 
 Raw transcript:
 """
