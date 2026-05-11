@@ -15,7 +15,7 @@ import {
   addChild, getChildren, getChild, updateChild, deleteChild,
   getCareGuide, updateGuideSection, addGuideItem, removeGuideItem, clearCareGuide,
   createChecklist, getChecklists, updateChecklistItem, deleteChecklist,
-  sendMessage, getMessages,
+  sendMessage, getMessages, listFamilyMembers, listenThread, listenInbox, markThreadRead,
   addPhotoMetadata, getPhotos, deletePhoto,
   searchGuide, getGuideSections, getSectionLabel,
   updateCriticalInfo, getCriticalInfo,
@@ -170,6 +170,8 @@ document.addEventListener('DOMContentLoaded', async () => {
               const p = await getSitterPermissions(userData.familyId, user.uid);
               if (p.success) state.permissions = p.data;
             }
+            // Subscribe to messages family-wide for nav badge + notifications
+            startGlobalMessageListener();
           } else {
             console.warn('Failed to load family:', familyResult.error);
             state.currentFamily = null;
@@ -295,6 +297,51 @@ function cleanupSubscriptions() {
   if (state.messageUnsubscribe) { state.messageUnsubscribe(); state.messageUnsubscribe = null; }
   if (state.shiftLogUnsubscribe) { state.shiftLogUnsubscribe(); state.shiftLogUnsubscribe = null; }
   if (state.flaggedUnsubscribe) { state.flaggedUnsubscribe(); state.flaggedUnsubscribe = null; }
+  if (state.inboxUnsubscribe) { state.inboxUnsubscribe(); state.inboxUnsubscribe = null; }
+  if (state.globalMessageUnsubscribe) { state.globalMessageUnsubscribe(); state.globalMessageUnsubscribe = null; }
+  state.totalUnread = 0;
+  state.openThreadUid = null;
+  state.seenMessageIds = new Set();
+  document.title = 'CribNotes';
+}
+
+/**
+ * Subscribe to ALL my messages family-wide so we can keep the nav badge up to
+ * date and fire a system notification when a new message arrives while the
+ * user is on another screen. Idempotent — safe to call after login.
+ */
+function startGlobalMessageListener() {
+  if (!state.currentFamily || !state.currentUser) return;
+  if (state.globalMessageUnsubscribe) return; // already running
+  state.seenMessageIds = state.seenMessageIds || new Set();
+  const myUid = state.currentUser.uid;
+
+  state.globalMessageUnsubscribe = listenInbox(state.currentFamily.id, myUid, ({ threads, totalUnread }) => {
+    state.totalUnread = totalUnread;
+    updateMessagesNavBadge(totalUnread);
+
+    // Detect new incoming messages and surface them
+    for (const t of threads) {
+      // Only the latest message in each thread matters for "new" detection
+      if (t.lastFrom && t.lastFrom !== myUid && t.unreadCount > 0) {
+        const key = `${t.otherUid}:${t.lastTimestamp?.toMillis ? t.lastTimestamp.toMillis() : ''}`;
+        if (state.seenMessageIds.has(key)) continue;
+        state.seenMessageIds.add(key);
+        // Don't notify for the thread the user has open
+        if (state.openThreadUid === t.otherUid) continue;
+        // In-app toast
+        showToast(`${t.otherName}: ${(t.lastMessage || '').slice(0, 80)}`, 'info');
+        // System notification (works on desktop and iOS PWA when permission granted)
+        if (typeof showLocalNotification === 'function' && 'Notification' in window && Notification.permission === 'granted') {
+          showLocalNotification(`Message from ${t.otherName}`, {
+            body: (t.lastMessage || '').slice(0, 120),
+            tag: `msg-${t.otherUid}`,
+            data: { url: '/app.html', threadUid: t.otherUid }
+          }).catch(() => {});
+        }
+      }
+    }
+  });
 }
 
 async function refreshActiveShift() {
@@ -1347,6 +1394,7 @@ async function renderParentDashboard() {
         <button class="nav-item" data-screen="messages">
           <span class="icon">💬</span>
           <span>Messages</span>
+          <span class="nav-badge" data-msg-badge style="display:none;"></span>
         </button>
         <button class="nav-item" data-screen="lists">
           <span class="icon">✓</span>
@@ -3018,23 +3066,171 @@ async function deletePhotoConfirm(childId, photoId) {
 // MESSAGES / CHAT
 // ============================================================================
 
+/**
+ * Inbox view — list of conversation partners with last-message preview and
+ * unread counts. Tapping a row opens that thread.
+ */
 async function renderMessagesScreen() {
+  if (state.messageUnsubscribe) { try { state.messageUnsubscribe(); } catch (e) {} state.messageUnsubscribe = null; }
+  if (state.inboxUnsubscribe) { try { state.inboxUnsubscribe(); } catch (e) {} state.inboxUnsubscribe = null; }
+
+  const myUid = state.currentUser.uid;
   const root = document.getElementById('app-root');
   root.innerHTML = `
     <div class="app-layout">
       <header class="app-header">
         <button class="btn-icon" id="back-btn">←</button>
         <h1 class="header-title">Messages</h1>
+        <button class="btn-icon" id="msg-enable-notif-btn" title="Notifications">🔔</button>
+      </header>
+
+      <main class="app-content">
+        <div class="container">
+          <div id="inbox-list" class="inbox-list">
+            <p class="text-muted" style="padding: 24px; text-align: center;">Loading…</p>
+          </div>
+          <h4 class="organized-heading" style="margin-top: 24px;">Start a new conversation</h4>
+          <div id="member-list" class="inbox-list">
+            <p class="text-muted" style="padding: 12px; text-align: center;">Loading family members…</p>
+          </div>
+        </div>
+      </main>
+    </div>
+  `;
+
+  document.getElementById('back-btn')?.addEventListener('click', () => {
+    if (state.userData.role === 'parent') renderParentDashboard();
+    else renderSitterDashboard();
+  });
+
+  document.getElementById('msg-enable-notif-btn')?.addEventListener('click', async () => {
+    const r = await requestNotificationPermission();
+    if (r.success) {
+      showToast('Notifications enabled', 'success');
+      // Best-effort: also try to subscribe to push if a VAPID key is configured
+      try { await subscribeToPush(); } catch (e) {}
+    } else if (r.permission === 'denied') {
+      showToast('Notifications are blocked. Enable in browser settings.', 'error');
+    } else {
+      showToast('Notifications not enabled', 'info');
+    }
+  });
+
+  // Pull family members for the "Start a new conversation" list
+  const membersResult = await listFamilyMembers(state.currentFamily.id);
+  const members = membersResult.success ? membersResult.data : [];
+
+  // Subscribe to inbox to render the active threads
+  let activeThreads = [];
+  state.inboxUnsubscribe = listenInbox(state.currentFamily.id, myUid, ({ threads, totalUnread }) => {
+    activeThreads = threads;
+    state.totalUnread = totalUnread;
+    updateMessagesNavBadge(totalUnread);
+    renderInboxList(threads, members);
+    renderMemberList(threads, members);
+  });
+}
+
+function renderInboxList(threads, allMembers) {
+  const el = document.getElementById('inbox-list');
+  if (!el) return;
+  if (!threads.length) {
+    el.innerHTML = `
+      <div class="empty-state" style="padding: 24px;">
+        <div class="empty-icon">💬</div>
+        <h3>No conversations yet</h3>
+        <p style="color: var(--color-text-light); font-size: 0.95rem;">Pick someone below to send a message.</p>
+      </div>
+    `;
+    return;
+  }
+  el.innerHTML = threads.map(t => {
+    const member = allMembers.find(m => m.uid === t.otherUid);
+    const roleLabel = member ? (member.role === 'parent' ? 'Parent' : 'Sitter') : '';
+    const avatar = renderAvatarHtml(member?.avatarUrl, member?.role === 'parent' ? '👤' : '👶');
+    const time = t.lastTimestamp?.toDate ? formatRelativeTime(t.lastTimestamp.toDate()) : '';
+    const unread = t.unreadCount > 0 ? `<span class="thread-unread-badge">${t.unreadCount}</span>` : '';
+    const preview = (t.lastMessage || '').length > 60 ? t.lastMessage.slice(0, 60) + '…' : (t.lastMessage || '');
+    return `
+      <button type="button" class="inbox-row" onclick="openMessageThread('${t.otherUid}', ${JSON.stringify(t.otherName).replace(/"/g, '&quot;')})">
+        <div class="inbox-avatar">${avatar}</div>
+        <div class="inbox-row-body">
+          <div class="inbox-row-top">
+            <span class="inbox-name">${escapeHtml(t.otherName)}</span>
+            ${roleLabel ? `<span class="inbox-role">${roleLabel}</span>` : ''}
+            <span class="inbox-time">${time}</span>
+          </div>
+          <div class="inbox-row-bottom">
+            <span class="inbox-preview">${escapeHtml(preview)}</span>
+            ${unread}
+          </div>
+        </div>
+      </button>
+    `;
+  }).join('');
+}
+
+function renderMemberList(threads, members) {
+  const el = document.getElementById('member-list');
+  if (!el) return;
+  if (!members.length) {
+    el.innerHTML = `<p class="text-muted" style="padding: 16px; text-align: center;">No other family members yet. Invite a sitter from settings.</p>`;
+    return;
+  }
+  // Hide members that already have a thread (they're shown above)
+  const threadUids = new Set(threads.map(t => t.otherUid));
+  const newPartners = members.filter(m => !threadUids.has(m.uid));
+  if (!newPartners.length) {
+    el.innerHTML = `<p class="text-muted" style="padding: 16px; text-align: center;">You already have a thread with everyone in the family.</p>`;
+    return;
+  }
+  el.innerHTML = newPartners.map(m => {
+    const avatar = renderAvatarHtml(m.avatarUrl, m.role === 'parent' ? '👤' : '👶');
+    const roleLabel = m.role === 'parent' ? 'Parent' : 'Sitter';
+    return `
+      <button type="button" class="inbox-row" onclick="openMessageThread('${m.uid}', ${JSON.stringify(m.name).replace(/"/g, '&quot;')})">
+        <div class="inbox-avatar">${avatar}</div>
+        <div class="inbox-row-body">
+          <div class="inbox-row-top">
+            <span class="inbox-name">${escapeHtml(m.name)}</span>
+            <span class="inbox-role">${roleLabel}</span>
+          </div>
+          <div class="inbox-row-bottom">
+            <span class="inbox-preview">Tap to start a conversation</span>
+          </div>
+        </div>
+      </button>
+    `;
+  }).join('');
+}
+
+function openMessageThread(otherUid, otherName) {
+  renderMessageThread(otherUid, otherName);
+}
+
+async function renderMessageThread(otherUid, otherName) {
+  if (state.messageUnsubscribe) { try { state.messageUnsubscribe(); } catch (e) {} state.messageUnsubscribe = null; }
+  // Keep the inbox listener alive so we still get global unread updates while
+  // in a specific thread; we'll just suppress toast for the open thread.
+  state.openThreadUid = otherUid;
+
+  const myUid = state.currentUser.uid;
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">←</button>
+        <h1 class="header-title">${escapeHtml(otherName)}</h1>
       </header>
 
       <main class="app-content">
         <div id="messages-container" class="messages-container">
-          <!-- Messages will be loaded here -->
+          <p class="text-muted" style="padding: 24px; text-align: center;">Loading…</p>
         </div>
       </main>
 
       <div class="message-input-area">
-        <input type="text" id="message-input" placeholder="Type a message..." class="message-input">
+        <input type="text" id="message-input" placeholder="Type a message…" class="message-input">
         <button id="send-btn" class="btn btn-icon btn-primary">→</button>
       </div>
     </div>
@@ -3044,53 +3240,70 @@ async function renderMessagesScreen() {
   const messageInput = document.getElementById('message-input');
   const sendBtn = document.getElementById('send-btn');
 
-  // Load messages with real-time listener
-  const msgResult = await getMessages(state.currentFamily.id, (messages) => {
-    messagesContainer.innerHTML = messages.map(msg => `
-      <div class="message ${msg.from === state.currentUser.uid ? 'sent' : 'received'}">
-        <div class="message-bubble">
-          ${msg.text}
-        </div>
-        <span class="message-time">${new Date(msg.timestamp?.toDate?.() || msg.timestamp).toLocaleTimeString()}</span>
-      </div>
-    `).join('');
-
-    // Scroll to bottom
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  document.getElementById('back-btn')?.addEventListener('click', () => {
+    if (state.messageUnsubscribe) { try { state.messageUnsubscribe(); } catch (e) {} state.messageUnsubscribe = null; }
+    state.openThreadUid = null;
+    renderMessagesScreen();
   });
 
-  if (msgResult.success) {
-    state.messageUnsubscribe = msgResult.unsubscribe;
-  }
+  state.messageUnsubscribe = listenThread(state.currentFamily.id, myUid, otherUid, (messages) => {
+    messagesContainer.innerHTML = messages.map(msg => {
+      const sent = msg.from === myUid;
+      const time = msg.timestamp?.toDate ? new Date(msg.timestamp.toDate()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      return `
+        <div class="message ${sent ? 'sent' : 'received'}">
+          <div class="message-bubble">${escapeHtml(msg.text || '')}</div>
+          <span class="message-time">${time}</span>
+        </div>
+      `;
+    }).join('') || `<p class="text-muted" style="padding: 24px; text-align: center;">No messages yet. Say hi.</p>`;
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    // Mark anything they sent as read now that I'm looking at it
+    markThreadRead(state.currentFamily.id, myUid, otherUid).catch(() => {});
+  });
 
   sendBtn.addEventListener('click', async () => {
     const text = messageInput.value.trim();
     if (!text) return;
-
     messageInput.value = '';
-
-    const result = await sendMessage(state.currentFamily.id, text);
-    if (!result.success) {
-      showToast(result.error, 'error');
-    }
+    const result = await sendMessage(state.currentFamily.id, text, { toUid: otherUid, toName: otherName });
+    if (!result.success) showToast(result.error, 'error');
   });
+  messageInput.addEventListener('keypress', e => { if (e.key === 'Enter') sendBtn.click(); });
+}
 
-  messageInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-      sendBtn.click();
-    }
-  });
+/**
+ * Friendly relative time: "just now", "5m", "3h", "Yesterday", "Apr 3".
+ */
+function formatRelativeTime(date) {
+  if (!date) return '';
+  const diff = Date.now() - date.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days}d`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
-  document.getElementById('back-btn')?.addEventListener('click', () => {
-    if (state.messageUnsubscribe) {
-      state.messageUnsubscribe();
-    }
-    if (state.userData.role === 'parent') {
-      renderParentDashboard();
+/**
+ * Keep the bottom-nav Messages button and the document title in sync with the
+ * total unread count.
+ */
+function updateMessagesNavBadge(count) {
+  document.querySelectorAll('[data-msg-badge]').forEach(el => {
+    if (count > 0) {
+      el.textContent = count > 9 ? '9+' : String(count);
+      el.style.display = '';
     } else {
-      renderSitterDashboard();
+      el.style.display = 'none';
     }
   });
+  const base = 'CribNotes';
+  document.title = count > 0 ? `(${count > 9 ? '9+' : count}) ${base}` : base;
 }
 
 // ============================================================================
@@ -4851,6 +5064,7 @@ function renderSitterBottomNav(active = 'home') {
       </button>
       <button class="nav-item ${active === 'messages' ? 'active' : ''}" id="nav-messages">
         <span class="icon">💬</span><span>Chat</span>
+        <span class="nav-badge" data-msg-badge style="display:none;"></span>
       </button>
     </nav>
   `;
@@ -5145,6 +5359,8 @@ window.confirmDeleteGuideItem = confirmDeleteGuideItem;
 window.renderParentDashboard = renderParentDashboard;
 window.renderSitterDashboard = renderSitterDashboard;
 window.renderMessagesScreen = renderMessagesScreen;
+window.openMessageThread = openMessageThread;
+window.renderMessageThread = renderMessageThread;
 window.renderEmergencyContacts = renderEmergencyContacts;
 window.renderDictationScreen = renderDictationScreen;
 window.copyInviteCode = copyInviteCode;

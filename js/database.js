@@ -398,23 +398,91 @@ export async function deleteChecklist(familyId, childId, checklistId) {
 }
 
 /**
- * Message Operations (real-time chat)
+ * Message Operations (per-recipient threads).
+ *
+ * Schema (families/{familyId}/messages/{msgId}):
+ *   from:       uid of sender
+ *   fromName:   display name at send time
+ *   to:         uid of recipient (null/undefined = legacy family-wide)
+ *   toName:     display name at send time
+ *   text:       message body
+ *   type:       'text' (future: 'photo', 'flag')
+ *   timestamp:  serverTimestamp
+ *   readBy:     { [uid]: serverTimestamp }  -- who has read it
  */
 
-export async function sendMessage(familyId, text, type = 'text') {
+/**
+ * List the other members of the family (anyone except current user).
+ * Returns [{ uid, name, email, role, avatarUrl }] from users collection.
+ */
+export async function listFamilyMembers(familyId) {
   try {
     const user = getCurrentUser();
     if (!user) throw new Error('No user logged in');
+    const famDoc = await db().collection('families').doc(familyId).get();
+    if (!famDoc.exists) throw new Error('Family not found');
+    const fam = famDoc.data();
+    const parentIds = Array.isArray(fam.parentIds) ? fam.parentIds : [];
+    const sitterIds = Array.isArray(fam.sitterIds) ? fam.sitterIds : [];
+    const allIds = Array.from(new Set([...parentIds, ...sitterIds])).filter(id => id !== user.uid);
+
+    if (allIds.length === 0) return { success: true, data: [] };
+
+    // Firestore 'in' supports up to 10 IDs; chunk if needed
+    const chunks = [];
+    for (let i = 0; i < allIds.length; i += 10) chunks.push(allIds.slice(i, i + 10));
+    const results = [];
+    for (const chunk of chunks) {
+      const snap = await db().collection('users')
+        .where(firebase.firestore.FieldPath.documentId(), 'in', chunk).get();
+      snap.forEach(doc => {
+        const d = doc.data();
+        const role = parentIds.includes(doc.id) ? 'parent' : 'babysitter';
+        results.push({
+          uid: doc.id,
+          name: d.displayName || d.name || d.email || 'Member',
+          email: d.email || '',
+          role,
+          avatarUrl: d.avatarUrl || null
+        });
+      });
+    }
+    // Sort: parents first then sitters, then alpha
+    results.sort((a, b) => {
+      if (a.role !== b.role) return a.role === 'parent' ? -1 : 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    return { success: true, data: results };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send a direct message from the current user to `toUid` (or family-wide
+ * broadcast if toUid is null).
+ */
+export async function sendMessage(familyId, text, opts = {}) {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('No user logged in');
+    const toUid = opts.toUid || null;
+    const toName = opts.toName || null;
+    const type = opts.type || 'text';
+
+    const payload = {
+      from: user.uid,
+      fromName: user.displayName || user.email || 'Member',
+      to: toUid,
+      toName,
+      text,
+      type,
+      timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+      readBy: { [user.uid]: firebase.firestore.FieldValue.serverTimestamp() }
+    };
 
     await db().collection('families').doc(familyId)
-      .collection('messages').add({
-        from: user.uid,
-        fromName: user.displayName || user.email,
-        text,
-        type,
-        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-        read: false
-      });
+      .collection('messages').add(payload);
 
     return { success: true };
   } catch (error) {
@@ -422,20 +490,131 @@ export async function sendMessage(familyId, text, type = 'text') {
   }
 }
 
+/**
+ * Live listener for the thread between `myUid` and `otherUid` in the given
+ * family. Includes legacy family-wide messages (where to is null) so existing
+ * data still shows up. Calls `onUpdate(messages)` with messages ordered oldest
+ * to newest.
+ */
+export function listenThread(familyId, myUid, otherUid, onUpdate) {
+  const col = db().collection('families').doc(familyId).collection('messages');
+  // Two listeners: messages I sent to them, messages they sent to me.
+  // Plus legacy broadcasts (to == null).
+  const all = new Map();
+  const emit = () => {
+    const arr = Array.from(all.values()).sort((a, b) => {
+      const ta = a.timestamp?.toMillis ? a.timestamp.toMillis() : 0;
+      const tb = b.timestamp?.toMillis ? b.timestamp.toMillis() : 0;
+      return ta - tb;
+    });
+    onUpdate(arr);
+  };
+
+  const subs = [];
+  // Sent: from me to them
+  subs.push(col.where('from', '==', myUid).where('to', '==', otherUid)
+    .onSnapshot(snap => { snap.forEach(d => all.set(d.id, { id: d.id, ...d.data() })); emit(); }));
+  // Received: from them to me
+  subs.push(col.where('from', '==', otherUid).where('to', '==', myUid)
+    .onSnapshot(snap => { snap.forEach(d => all.set(d.id, { id: d.id, ...d.data() })); emit(); }));
+
+  return () => subs.forEach(unsub => unsub());
+}
+
+/**
+ * Live listener over ALL messages involving the current user. Calls
+ * `onUpdate({ threadsByPartner, totalUnread })` where threadsByPartner is a
+ * map keyed by the other party's uid containing { otherUid, otherName,
+ * lastMessage, lastTimestamp, lastFrom, unreadCount }.
+ */
+export function listenInbox(familyId, myUid, onUpdate) {
+  const col = db().collection('families').doc(familyId).collection('messages');
+  const all = new Map();
+
+  const emit = () => {
+    const threads = new Map();
+    for (const m of all.values()) {
+      const otherUid = m.from === myUid ? m.to : m.from;
+      // Skip legacy broadcasts in inbox view (they'll show in a synthetic
+      // "Everyone" thread if needed, but for now only show direct).
+      if (!otherUid) continue;
+      const otherName = m.from === myUid ? (m.toName || 'Member') : (m.fromName || 'Member');
+
+      let t = threads.get(otherUid);
+      if (!t) {
+        t = { otherUid, otherName, lastMessage: '', lastTimestamp: null, lastFrom: null, unreadCount: 0 };
+        threads.set(otherUid, t);
+      }
+      const ts = m.timestamp?.toMillis ? m.timestamp.toMillis() : 0;
+      const cur = t.lastTimestamp?.toMillis ? t.lastTimestamp.toMillis() : 0;
+      if (ts >= cur) {
+        t.lastMessage = m.text || '';
+        t.lastTimestamp = m.timestamp;
+        t.lastFrom = m.from;
+        // Keep latest name in case display name changed
+        if (m.from !== myUid && m.fromName) t.otherName = m.fromName;
+      }
+      // Unread = sent to me by them AND I haven't acked it
+      if (m.from !== myUid && m.from === otherUid) {
+        const ackedByMe = m.readBy && m.readBy[myUid];
+        if (!ackedByMe) t.unreadCount++;
+      }
+    }
+    const list = Array.from(threads.values())
+      .sort((a, b) => {
+        const ta = a.lastTimestamp?.toMillis ? a.lastTimestamp.toMillis() : 0;
+        const tb = b.lastTimestamp?.toMillis ? b.lastTimestamp.toMillis() : 0;
+        return tb - ta;
+      });
+    const totalUnread = list.reduce((s, t) => s + t.unreadCount, 0);
+    onUpdate({ threads: list, totalUnread });
+  };
+
+  const subs = [];
+  subs.push(col.where('from', '==', myUid)
+    .onSnapshot(snap => { snap.forEach(d => all.set(d.id, { id: d.id, ...d.data() })); emit(); }));
+  subs.push(col.where('to', '==', myUid)
+    .onSnapshot(snap => { snap.forEach(d => all.set(d.id, { id: d.id, ...d.data() })); emit(); }));
+
+  return () => subs.forEach(unsub => unsub());
+}
+
+/**
+ * Mark every unread message in the thread between me and otherUid as read.
+ * Uses a batch write so it counts as one Firestore operation per chunk of 500.
+ */
+export async function markThreadRead(familyId, myUid, otherUid) {
+  try {
+    const col = db().collection('families').doc(familyId).collection('messages');
+    const snap = await col.where('from', '==', otherUid).where('to', '==', myUid).get();
+    const batch = db().batch();
+    let count = 0;
+    snap.forEach(doc => {
+      const data = doc.data();
+      if (data.readBy && data.readBy[myUid]) return;
+      batch.update(doc.ref, {
+        [`readBy.${myUid}`]: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      count++;
+    });
+    if (count > 0) await batch.commit();
+    return { success: true, count };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// Backward-compat: getMessages still works for the old call site, returning
+// every message in the family unfiltered. New code uses listenThread/listenInbox.
 export async function getMessages(familyId, onNewMessage) {
   try {
-    // Set up real-time listener
     const unsubscribe = db().collection('families').doc(familyId)
       .collection('messages')
       .orderBy('timestamp', 'asc')
       .onSnapshot(snapshot => {
-        const messages = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
+        const messages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         onNewMessage(messages);
       });
-
     return { success: true, unsubscribe };
   } catch (error) {
     return { success: false, error: error.message };

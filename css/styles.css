@@ -1462,6 +1462,114 @@ textarea { min-height: 100px; resize: vertical; }
 .nav-item:hover { color: white; background: rgba(255, 255, 255, 0.08); }
 .nav-item.active { background: white; color: var(--color-ink); }
 .nav-item .icon { font-size: 1.1rem; line-height: 1; }
+.nav-item { position: relative; }
+.nav-badge {
+  position: absolute;
+  top: 4px;
+  right: 18%;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: #c0392b;
+  color: white;
+  border-radius: 9px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Inbox-style message list */
+.inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.inbox-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, transform 0.05s;
+}
+.inbox-row:hover { background: var(--color-bone); border-color: var(--color-ink); }
+.inbox-row:active { transform: scale(0.98); }
+.inbox-avatar {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--color-bone);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+}
+.inbox-row-body { flex: 1; min-width: 0; }
+.inbox-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.inbox-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--color-ink);
+}
+.inbox-role {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-light);
+  background: var(--color-bone);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+}
+.inbox-time {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--color-text-light);
+}
+.inbox-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.inbox-preview {
+  flex: 1;
+  font-size: 0.92rem;
+  color: var(--color-text-light);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-unread-badge {
+  flex-shrink: 0;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  background: #c0392b;
+  color: white;
+  border-radius: 11px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 /* ============================================================================
    MODALS / OVERLAYS / TOASTS
