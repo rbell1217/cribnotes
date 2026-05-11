@@ -845,5 +845,51 @@
       </div>
     </footer>
 
+    <!-- Welcome-back banner for signed-in users.
+         Loads Firebase Auth in compat mode, listens once, swaps the marketing
+         CTAs for a single "Continue to your family →" call to action. -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="js/config.js"></script>
+    <script>
+      (function welcomeBack() {
+        try {
+          if (typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey) return;
+          if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+          firebase.auth().onAuthStateChanged(function (user) {
+            if (!user) return;
+            // Banner
+            var name = user.displayName || (user.email ? user.email.split('@')[0] : 'there');
+            var banner = document.createElement('div');
+            banner.style.cssText =
+              'position:fixed;top:0;left:0;right:0;z-index:100;' +
+              'background:#1A1A1A;color:#F5EFE6;padding:10px 16px;' +
+              'display:flex;align-items:center;justify-content:center;gap:14px;' +
+              "font-family:'Inter',sans-serif;font-size:0.95rem;flex-wrap:wrap;";
+            banner.innerHTML =
+              '<span>Welcome back, <strong>' + escape(name) + '</strong>.</span>' +
+              '<a href="/app.html" style="background:#D85A3A;color:white;text-decoration:none;padding:6px 16px;border-radius:9999px;font-weight:600;">Continue to your family →</a>' +
+              '<button id="welcome-signout" style="background:transparent;color:#F5EFE6;border:1px solid rgba(245,239,230,0.4);padding:6px 12px;border-radius:9999px;font:inherit;cursor:pointer;">Sign out</button>';
+            document.body.prepend(banner);
+            // Add top padding so banner doesn't overlap the header
+            document.body.style.paddingTop = (banner.offsetHeight + 4) + 'px';
+            document.getElementById('welcome-signout').addEventListener('click', function () {
+              firebase.auth().signOut().then(function () { location.reload(); });
+            });
+            // Replace primary marketing CTAs with "Continue to your family"
+            document.querySelectorAll('a[href="/app.html?signup=1"], a[href="/app.html?signin=1"]').forEach(function (el) {
+              el.setAttribute('href', '/app.html');
+              if (el.classList.contains('btn-primary') || el.classList.contains('btn-lg')) {
+                el.textContent = 'Continue to your family →';
+              }
+            });
+          });
+        } catch (e) { /* fail silently — landing page still works */ }
+        function escape(s) { return String(s).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        }); }
+      })();
+    </script>
+
 </body>
 </html>

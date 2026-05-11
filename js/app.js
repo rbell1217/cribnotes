@@ -562,8 +562,11 @@ async function handleLogin(e) {
   if (!result.success) {
     showToast(result.error, 'error');
     hideLoading();
+    return;
   }
-  // On success, auth state change listener will route
+  // On success, redirect to landing page so the user gets the welcome-back
+  // banner before continuing into their family.
+  location.href = '/';
 }
 
 async function handleSignup(e) {
@@ -594,7 +597,9 @@ async function handleGoogleLogin() {
   if (!result.success) {
     showToast(result.error, 'error');
     hideLoading();
+    return;
   }
+  location.href = '/';
 }
 
 async function handlePasswordReset(e) {

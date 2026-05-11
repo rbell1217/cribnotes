@@ -2,7 +2,7 @@
   "name": "CribNotes",
   "short_name": "CribNotes",
   "description": "Living, context-aware childcare guide for parents and babysitters",
-  "start_url": "./app.html",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
