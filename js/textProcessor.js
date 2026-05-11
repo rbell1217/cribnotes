@@ -370,14 +370,18 @@ function deduplicateItems(items) {
 // ==========================================================================
 
 function processDictationLocally(transcript, childName) {
-  const segments = splitByTopicBoundary(transcript);
-  console.log('[CribNotes] Topic segments:', segments);
+  // Voice dictation usually arrives without proper punctuation, so we can't
+  // rely on sentence boundaries alone. Use transition phrases + topic-shift
+  // signals to break the stream into short, atomic chunks.
+  const chunks = splitIntoAtomicChunks(transcript);
+  console.log('[CribNotes] Dictation chunks:', chunks.length, 'avg words:',
+    Math.round(chunks.reduce((s, c) => s + c.split(/\s+/).length, 0) / Math.max(1, chunks.length)));
 
   const categorized = {};
-  segments.forEach(segment => {
-    const category = getBestCategory(segment);
+  chunks.forEach(chunk => {
+    const category = getBestCategory(chunk);
     if (!categorized[category]) categorized[category] = [];
-    categorized[category].push(segment);
+    categorized[category].push(chunk);
   });
 
   const sections = {};
@@ -390,6 +394,95 @@ function processDictationLocally(transcript, childName) {
   }
 
   return { sections };
+}
+
+/**
+ * Break dictation into atomic chunks — one short fact each. This is the
+ * fallback when no AI processor is available; it's purely string-driven
+ * so it works offline and never hallucinates.
+ *
+ * Strategy:
+ *   1. Normalize whitespace + lowercase punctuation noise.
+ *   2. Insert virtual splits BEFORE every transition phrase ("and then",
+ *      "also", "when he", "for breakfast", etc.) — these reliably mark
+ *      where one fact ends and another starts.
+ *   3. Also split on actual punctuation: . ! ? ; , – —
+ *   4. After splitting, any chunk longer than ~18 words is re-split at
+ *      the next pronoun ("he", "she", "they") or at the next preposition
+ *      starting a new clause ("for", "at", "in", "during").
+ *   5. Discard tiny fragments (<= 3 words) and dedupe.
+ */
+function splitIntoAtomicChunks(rawText) {
+  let text = (rawText || '').replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+
+  // Phrases that signal "a new fact is starting". The leading space avoids
+  // splitting inside words like "another". The captured group is preserved
+  // so the new chunk still reads naturally.
+  const transitionPhrases = [
+    'and then', 'and also', 'also', 'then', 'next', 'after that',
+    'oh and', 'oh also', 'by the way', "don't forget", 'remember',
+    'when she', 'when he', 'when they', "when it's", 'when im',
+    'when i\'m', 'when going', 'before bed', 'before nap', 'before school',
+    'at bedtime', 'at naptime', 'at night', 'in the morning', 'in the afternoon',
+    'in the evening', 'during the day', 'during nap', 'for breakfast',
+    'for lunch', 'for dinner', 'for snack', 'for snacks',
+    'her favorite', 'his favorite', 'she likes', 'he likes',
+    'she loves', 'he loves', 'she doesn\'t', 'he doesn\'t',
+    'she won\'t', 'he won\'t', 'she needs', 'he needs',
+    'allergic to', 'allergy to', 'do not', 'never give', 'always give',
+    'if she', 'if he', 'if they', 'in case'
+  ];
+
+  // Build a regex that inserts a marker BEFORE any transition phrase.
+  // Use word boundary at the start so we don't match mid-word.
+  const transitionRe = new RegExp(
+    '\\b(' + transitionPhrases.map(p => p.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')).join('|') + ')\\b',
+    'gi'
+  );
+  text = text.replace(transitionRe, '|||$1');
+
+  // Also break at real punctuation
+  text = text.replace(/([.!?;])\s*/g, '$1|||');
+
+  // First pass: chunks by marker
+  let chunks = text.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+
+  // Second pass: break overly-long chunks at pronoun or preposition boundaries
+  const refined = [];
+  for (const chunk of chunks) {
+    const words = chunk.split(/\s+/);
+    if (words.length <= 18) {
+      refined.push(chunk);
+      continue;
+    }
+    refined.push(...subdivideLongChunk(chunk));
+  }
+
+  // Drop fragments shorter than 4 words (unlikely to be a useful guide item)
+  // and items that are just filler ("um", "okay", "yeah").
+  return refined
+    .map(s => s.replace(/^[,;:.\s]+/, '').trim())
+    .filter(s => s.split(/\s+/).length >= 3)
+    .filter(s => !/^(um+|uh+|ok|okay|yeah|so|alright|right)$/i.test(s));
+}
+
+function subdivideLongChunk(chunk) {
+  // Look for natural sub-break points inside a long chunk: a pronoun starting
+  // a new clause, or a preposition that often opens a new topic.
+  const breakRe = /\s(he|she|they|her|his|their|for|at|in|on|during|before|after|when|if|while|because|so that)\s/gi;
+  const out = [];
+  let last = 0;
+  let m;
+  while ((m = breakRe.exec(chunk)) !== null) {
+    const cut = m.index + 1; // skip leading space
+    if (cut - last >= 18) { // only break if the running piece is already long enough
+      out.push(chunk.slice(last, cut).trim());
+      last = cut;
+    }
+  }
+  out.push(chunk.slice(last).trim());
+  return out.filter(s => s.split(/\s+/).length >= 3);
 }
 
 // ==========================================================================

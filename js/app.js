@@ -2016,15 +2016,25 @@ async function renderDictationScreen(childId) {
         return;
       }
 
-      // Render polished results
-      resultsList.innerHTML = Object.entries(organizedItems).map(([section, items]) => `
-        <div style="background: #f8f9fa; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
-          <strong style="color: #1a365d;">${getSectionLabel(section)}</strong>
-          <ul style="margin: 8px 0 0 16px; padding: 0; list-style: none;">
-            ${items.map(item => `<li style="margin: 6px 0; color: #333; padding-left: 12px; border-left: 3px solid #e76f51; line-height: 1.4;">${item}</li>`).join('')}
-          </ul>
+      // Render polished results as cards — one per section, items as cards inside
+      const totalCount = Object.values(organizedItems).reduce((s, arr) => s + arr.length, 0);
+      resultsList.innerHTML = `
+        <div class="dictation-result-summary">
+          <strong>${totalCount} note${totalCount === 1 ? '' : 's'}</strong>
+          <span>across ${Object.keys(organizedItems).length} section${Object.keys(organizedItems).length === 1 ? '' : 's'}</span>
         </div>
-      `).join('');
+        ${Object.entries(organizedItems).map(([section, items]) => `
+          <div class="dictation-result-card">
+            <div class="drc-header">
+              <h4>${getSectionLabel(section)}</h4>
+              <span class="drc-count">${items.length}</span>
+            </div>
+            <ul class="drc-items">
+              ${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}
+            </ul>
+          </div>
+        `).join('')}
+      `;
     } catch (error) {
       console.error('[CribNotes] Processing error:', error);
       resultsList.innerHTML = `<p style="color: #e74c3c;">Error processing text: ${error.message}</p>`;
@@ -3336,6 +3346,13 @@ async function renderEditChildForm(childId) {
       <button class="btn btn-primary" onclick="saveEditedChild('${childId}')">Save</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
     </div>
+    <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--color-border);">
+    <button class="btn btn-outline btn-full" onclick="deleteChildConfirm('${childId}')" style="color: var(--color-rust); border-color: var(--color-rust);">
+      Remove ${escapeHtml(c.name)} from family
+    </button>
+    <p style="font-size: 0.8rem; color: var(--color-text-light); margin-top: 6px; text-align: center;">
+      Removes this child and all of their data permanently.
+    </p>
   `);
   document.getElementById('edit-child-avatar-input')?.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
@@ -3496,22 +3513,23 @@ function showToast(message, type = 'info') {
 
 function showModal(content) {
   const root = document.getElementById('app-root');
-  if (!document.getElementById('modal-overlay')) {
-    const overlay = document.createElement('div');
-    overlay.id = 'modal-overlay';
-    root.appendChild(overlay);
-  }
+  // Always tear down any existing modal first so callers that re-show themselves
+  // (e.g. profile photo upload refresh) don't stack a new modal on top.
+  const existing = document.getElementById('modal-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'modal-overlay';
+  root.appendChild(overlay);
 
   const modal = document.createElement('div');
   modal.className = 'modal';
   modal.innerHTML = content;
-  document.getElementById('modal-overlay').appendChild(modal);
+  overlay.appendChild(modal);
 
   // Close on overlay click
-  document.getElementById('modal-overlay').addEventListener('click', (e) => {
-    if (e.target === document.getElementById('modal-overlay')) {
-      closeModal();
-    }
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeModal();
   });
 }
 

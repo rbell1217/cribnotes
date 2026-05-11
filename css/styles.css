@@ -1577,6 +1577,76 @@ textarea { min-height: 100px; resize: vertical; }
 .interim-text { font-style: italic; color: var(--color-text-light); margin-top: 8px; }
 
 /* ============================================================================
+   DICTATION RESULTS CARDS
+   ============================================================================ */
+
+.dictation-result-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+.dictation-result-summary strong {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--color-ink);
+}
+.dictation-result-summary span {
+  color: var(--color-text-light);
+  font-size: 0.92rem;
+}
+
+.dictation-result-card {
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  margin-bottom: 10px;
+}
+.drc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.drc-header h4 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--color-ink);
+}
+.drc-count {
+  background: var(--color-ink);
+  color: white;
+  font-size: 0.75rem;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+}
+.drc-items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.drc-items li {
+  padding: 8px 12px 8px 14px;
+  background: var(--color-bone);
+  border-left: 3px solid var(--color-rust);
+  border-radius: 8px;
+  font-size: 0.93rem;
+  line-height: 1.45;
+  color: var(--color-ink);
+}
+
+/* ============================================================================
    AVATARS (user + child profile photos)
    ============================================================================ */
 
