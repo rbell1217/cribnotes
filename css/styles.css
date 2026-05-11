@@ -1682,6 +1682,20 @@ textarea { min-height: 100px; resize: vertical; }
   line-height: 1.5;
   color: var(--color-ink);
 }
+/* Bold "LABEL:" prefix for scannable items like "Bedtime: 8:00 PM" */
+.drc-label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--color-ink);
+  margin-right: 6px;
+  text-transform: uppercase;
+  font-size: 0.92em;
+  letter-spacing: 0.02em;
+}
+.drc-label::after {
+  content: ':';
+  margin-left: 1px;
+}
 
 /* ============================================================================
    AVATARS (user + child profile photos)

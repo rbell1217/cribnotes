@@ -133,12 +133,25 @@ function buildDictationPrompt(text, childName) {
 Your job:
 1. Extract all meaningful care information from the transcript
 2. Organize it into the correct sections (listed below)
-3. Rewrite each item to be clear, concise, and well-structured
+3. Rewrite each item to be SCANNABLE at a glance, using a "Label: value" format wherever possible
 4. Preserve all specific details (names, phone numbers, times, food items, medications, etc.) exactly as stated
 5. Remove filler words, repetition, and speech artifacts
-6. Use third person (e.g., "${childName || 'Child'} goes to bed at 7pm" not "you go to bed at 7pm")
-7. Each item should be a complete, standalone instruction or piece of information
-8. If the same topic is mentioned multiple times, merge into one comprehensive item
+6. If the same topic is mentioned multiple times, merge into one comprehensive item
+
+FORMAT EVERY ITEM AS "LABEL: VALUE" WHEN POSSIBLE. The label should be short (1-3 words), capitalized like a heading, followed by a colon and the value. Examples:
+- "Wake up: 10:00 AM" (NOT "${childName || 'Child'} wakes up at 10:00 AM")
+- "Bedtime: 8:00 PM"
+- "Nap: 1:00 PM, 90 minutes"
+- "Pediatrician: Dr. Smith, 401-555-9999"
+- "Emergency contact: Aunt Ariel, 401-225-3961"
+- "Favorite food: Pasta with butter"
+- "Allergy: Peanuts"
+- "Medication: Tylenol, 5mL every 4 hours if fever over 101"
+- "Comfort item: Brown teddy bear named Mr. Bear"
+- "Diaper size: 4"
+- "School: Mount Carmel, drop-off 8:30 AM"
+
+Only use a full sentence when the information is genuinely procedural (multi-step instruction) and can't be compressed into a label:value pair. Example: "Bedtime routine: Bath, two books, then white noise machine on dresser."
 
 Sections:
 - emergencyContacts: Phone numbers, who to call, emergency procedures
@@ -156,7 +169,7 @@ Sections:
 IMPORTANT: Only include a section in your response if the transcript contains relevant information for it. Skip sections with no relevant content.
 
 Respond in this exact JSON format (no markdown, no code fences):
-{"sections":{"sectionKey":["Item 1","Item 2"],"anotherKey":["Item 1"]}}
+{"sections":{"sectionKey":["Label: value","Another label: another value"],"anotherKey":["Label: value"]}}
 
 Raw transcript:
 """

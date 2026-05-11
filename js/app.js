@@ -2017,7 +2017,9 @@ async function renderDictationScreen(childId) {
         return;
       }
 
-      // Render polished results as cards — one per section, items as cards inside
+      // Render polished results as cards — one per section, items as cards inside.
+      // If an item is shaped like "Label: value", render the label in bold so
+      // sitters can scan the card at a glance.
       const totalCount = Object.values(organizedItems).reduce((s, arr) => s + arr.length, 0);
       resultsList.innerHTML = `
         <div class="dictation-result-summary">
@@ -2031,7 +2033,7 @@ async function renderDictationScreen(childId) {
               <span class="drc-count">${items.length}</span>
             </div>
             <ul class="drc-items">
-              ${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}
+              ${items.map(item => renderDictationItem(item)).join('')}
             </ul>
           </div>
         `).join('')}
@@ -4583,6 +4585,23 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * Render a single dictation result item as an <li>.
+ * If the item is shaped like "Label: value" (label <= 40 chars, no colon
+ * inside the label), the label is rendered bold so the sitter can scan
+ * the card at a glance. Falls back to plain text otherwise.
+ */
+function renderDictationItem(item) {
+  const text = typeof item === 'string' ? item : (item && item.text) || '';
+  // Match "Label: value" — label is 1-40 chars without internal colons,
+  // value is everything after the FIRST colon.
+  const m = text.match(/^([^:]{1,40}):\s+(.+)$/s);
+  if (m) {
+    return `<li><span class="drc-label">${escapeHtml(m[1])}</span>${escapeHtml(m[2])}</li>`;
+  }
+  return `<li>${escapeHtml(text)}</li>`;
 }
 
 // Make global functions available
