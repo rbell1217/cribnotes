@@ -36,7 +36,12 @@ import {
   startDictation, stopDictation, abortDictation
 } from './dictation.js';
 
-import { processTranscript, processChecklistDictation } from './textProcessor.js';
+import {
+  processTranscript,
+  processChecklistDictation,
+  processMedicationDictation,
+  processCriticalDictation
+} from './textProcessor.js';
 
 import { isFirebaseConfigured } from './config.js';
 
@@ -4166,11 +4171,19 @@ function renderEditCriticalInfoForm(childId, critical) {
   const ins = c.insurance || {};
   const ped = c.pediatrician || {};
 
+  const canDictate = isSpeechRecognitionAvailable();
   showModal(`
     <h3>Critical Info</h3>
     <p style="color: var(--color-text-light); font-size: 0.9em; margin-bottom: 12px;">
       One per line. Use " | " between fields.
     </p>
+
+    ${canDictate ? `
+      <button type="button" class="btn btn-outline" id="ci-dictate-btn" style="width: 100%; margin-bottom: 12px;">
+        🎤 Dictate critical info
+      </button>
+      <div id="ci-dictate-status" style="display:none; margin-bottom: 10px; padding: 10px 12px; background: var(--color-bone); border-radius: 8px; font-size: 0.9em;"></div>
+    ` : ''}
 
     <label class="form-label">Allergies <small>(allergen | severity | reaction | treatment)</small></label>
     <textarea id="ci-allergies" rows="3" class="form-input">${escapeHtml(allergiesText)}</textarea>
@@ -4198,6 +4211,68 @@ function renderEditCriticalInfoForm(childId, critical) {
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
     </div>
   `);
+
+  if (canDictate) {
+    attachDictationToForm({
+      btnId: 'ci-dictate-btn',
+      statusId: 'ci-dictate-status',
+      label: 'Dictate critical info',
+      listenHint: 'Listening… mention allergies, current meds, emergency contacts, pediatrician, insurance, blood type.',
+      processFn: (t) => processCriticalDictation(t, ''),
+      applyResult: (data) => {
+        let added = 0;
+
+        const appendLines = (textareaId, newLines) => {
+          if (!Array.isArray(newLines) || newLines.length === 0) return;
+          const ta = document.getElementById(textareaId);
+          if (!ta) return;
+          const existing = ta.value ? ta.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
+          const seen = new Set(existing.map(l => l.toLowerCase()));
+          for (const line of newLines) {
+            if (!line) continue;
+            const key = line.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            existing.push(line);
+            added++;
+          }
+          ta.value = existing.join('\n');
+        };
+
+        if (Array.isArray(data.allergies)) {
+          appendLines('ci-allergies', data.allergies.map(a =>
+            [a.allergen, a.severity, a.reaction, a.treatment].filter(Boolean).join(' | ')
+          ));
+        }
+        if (Array.isArray(data.medications)) {
+          appendLines('ci-meds', data.medications.map(m =>
+            [m.name, m.dose, m.schedule, m.notes].filter(Boolean).join(' | ')
+          ));
+        }
+        if (Array.isArray(data.emergencyContacts)) {
+          appendLines('ci-ec', data.emergencyContacts.map(p =>
+            [p.name, p.relationship, p.phone].filter(Boolean).join(' | ')
+          ));
+        }
+        const setIfEmpty = (id, value) => {
+          if (!value) return;
+          const el = document.getElementById(id);
+          if (el && !el.value.trim()) { el.value = value; added++; }
+        };
+        setIfEmpty('ci-bloodtype', data.bloodType);
+        if (data.pediatrician) {
+          setIfEmpty('ci-ped-name', data.pediatrician.name);
+          setIfEmpty('ci-ped-phone', data.pediatrician.phone);
+        }
+        if (data.insurance) {
+          setIfEmpty('ci-ins-provider', data.insurance.provider);
+          setIfEmpty('ci-ins-policy', data.insurance.policyNumber);
+          setIfEmpty('ci-ins-group', data.insurance.groupNumber);
+        }
+        return added ? `Filled in ${added} field${added === 1 ? '' : 's'}. Review and tap Save.` : 'Nothing new found in that recording.';
+      }
+    });
+  }
 
   document.getElementById('save-critical-btn').addEventListener('click', async () => {
     const parseLines = (text, fields) => text.split('\n')
@@ -4594,8 +4669,15 @@ async function renderMedicationsScreen(childId) {
 }
 
 function renderAddMedicationForm(childId) {
+  const canDictate = isSpeechRecognitionAvailable();
   showModal(`
     <h3>Add Medication</h3>
+    ${canDictate ? `
+      <button type="button" class="btn btn-outline" id="med-dictate-btn" style="width: 100%; margin-bottom: 12px;">
+        🎤 Dictate medication
+      </button>
+      <div id="med-dictate-status" style="display:none; margin-bottom: 10px; padding: 10px 12px; background: var(--color-bone); border-radius: 8px; font-size: 0.9em;"></div>
+    ` : ''}
     <input id="med-name" class="form-input" placeholder="Name (e.g., Tylenol)">
     <input id="med-dose" class="form-input" placeholder="Dose (e.g., 5 mL)">
     <input id="med-route" class="form-input" placeholder="Route (oral, topical, etc.)">
@@ -4611,6 +4693,33 @@ function renderAddMedicationForm(childId) {
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
     </div>
   `);
+
+  if (canDictate) {
+    attachDictationToForm({
+      btnId: 'med-dictate-btn',
+      statusId: 'med-dictate-status',
+      label: 'Dictate medication',
+      listenHint: 'Listening… describe the medication, dose, schedule, and any notes.',
+      processFn: (t) => processMedicationDictation(t, ''),
+      applyResult: (med) => {
+        if (med.name) document.getElementById('med-name').value = med.name;
+        if (med.dose) document.getElementById('med-dose').value = med.dose;
+        if (med.route) document.getElementById('med-route').value = med.route;
+        if (Array.isArray(med.scheduledTimes) && med.scheduledTimes.length) {
+          document.getElementById('med-times').value = med.scheduledTimes.join(', ');
+        }
+        if (typeof med.cooldownHours === 'number') {
+          document.getElementById('med-cooldown').value = String(med.cooldownHours);
+        }
+        if (typeof med.asNeeded === 'boolean') {
+          document.getElementById('med-asneeded').checked = med.asNeeded;
+        }
+        if (med.notes) document.getElementById('med-notes').value = med.notes;
+        return `Filled in ${med.name || 'the medication'}. Edit anything that looks off, then tap Save.`;
+      }
+    });
+  }
+
   document.getElementById('med-save-btn').addEventListener('click', async () => {
     const name = document.getElementById('med-name').value.trim();
     if (!name) { showToast('Name required', 'error'); return; }
@@ -4822,6 +4931,73 @@ function renderGuideItemTextHtml(text) {
     return `<span class="drc-label">${escapeHtml(m[1])}</span>${escapeHtml(m[2])}`;
   }
   return escapeHtml(text || '');
+}
+
+/**
+ * Wire a "🎤 Dictate ..." button to a structured-AI processor and apply the
+ * result to a form. Used by the Add Medication, Edit Critical Info, and
+ * Create Checklist forms.
+ *
+ * config = {
+ *   btnId,                              // id of the mic toggle button
+ *   statusId,                           // id of the inline status pill
+ *   label,                              // "Dictate medication" etc.
+ *   listenHint,                         // text shown while recording
+ *   processFn:   async (transcript) =>  // AI processor (returns structured obj)
+ *   applyResult: (structured) => msg    // fill form fields, return status text
+ * }
+ */
+function attachDictationToForm(config) {
+  const btn = document.getElementById(config.btnId);
+  const status = document.getElementById(config.statusId);
+  if (!btn) return;
+  let dictating = false;
+
+  const reset = () => {
+    dictating = false;
+    btn.textContent = `🎤 ${config.label}`;
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-outline');
+    btn.style.background = '';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+  };
+
+  btn.addEventListener('click', async () => {
+    if (dictating) {
+      stopDictation();
+      return;
+    }
+    dictating = true;
+    btn.textContent = '⏹ Stop dictation';
+    btn.classList.remove('btn-outline');
+    btn.classList.add('btn-primary');
+    btn.style.background = '#c0392b';
+    btn.style.borderColor = '#c0392b';
+    btn.style.color = 'white';
+    if (status) {
+      status.style.display = 'block';
+      status.textContent = config.listenHint;
+    }
+    try {
+      const result = await startDictation();
+      const transcript = result?.transcript || '';
+      if (!transcript.trim()) {
+        if (status) status.textContent = 'No speech detected. Try again.';
+        reset();
+        return;
+      }
+      if (status) status.textContent = 'Processing…';
+      const structured = await config.processFn(transcript);
+      const msg = config.applyResult(structured);
+      if (status) status.textContent = msg || 'Done.';
+    } catch (err) {
+      console.error('[CribNotes] Form dictation failed:', err);
+      if (status) status.textContent = 'Could not capture audio: ' + (err.message || 'unknown error');
+    } finally {
+      reset();
+    }
+  });
 }
 
 /**

@@ -63,6 +63,35 @@ export async function processChecklistDictation(transcript, childName) {
 }
 
 /**
+ * Process a medication dictation into a structured medication record.
+ * Falls back to a name-only record if the AI is unavailable.
+ */
+export async function processMedicationDictation(transcript, childName) {
+  try {
+    const result = await processWithAI(transcript, childName, { mode: 'medication' });
+    if (result && result.name) return result;
+  } catch (err) {
+    console.log('[CribNotes] Medication AI unavailable:', err.message);
+  }
+  const firstLine = (transcript || '').split(/[.\n]/)[0].trim();
+  return { name: firstLine, dose: '', route: '', scheduledTimes: [], cooldownHours: 4, asNeeded: false, notes: '' };
+}
+
+/**
+ * Process a critical-info dictation into the same shape the Critical Info
+ * card expects. Returns an empty object on failure.
+ */
+export async function processCriticalDictation(transcript, childName) {
+  try {
+    const result = await processWithAI(transcript, childName, { mode: 'critical' });
+    if (result && typeof result === 'object') return result;
+  } catch (err) {
+    console.log('[CribNotes] Critical AI unavailable:', err.message);
+  }
+  return {};
+}
+
+/**
  * AI-powered processing via serverless function
  */
 async function processWithAI(transcript, childName, opts) {

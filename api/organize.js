@@ -28,13 +28,21 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'No transcript provided' });
   }
 
-  // Three prompt modes:
+  // Five prompt modes:
+  //   - 'medication' : extract structured medication record
+  //   - 'critical'   : extract structured critical-info record (allergies, etc.)
   //   - 'checklist'  : flat to-do list (no sections)
   //   - 'document'   : structured doc, preserve wording
   //   - default      : free-form dictation -> sections + critical info
   let prompt;
   let maxTokens;
-  if (mode === 'checklist') {
+  if (mode === 'medication') {
+    prompt = buildMedicationPrompt(transcript, childName);
+    maxTokens = 1024;
+  } else if (mode === 'critical') {
+    prompt = buildCriticalPrompt(transcript, childName);
+    maxTokens = 1024;
+  } else if (mode === 'checklist') {
     prompt = buildChecklistPrompt(transcript, childName);
     maxTokens = 1024;
   } else if (isDocument) {
@@ -188,6 +196,47 @@ Always include the same facts in the relevant guide section AND in the critical 
 
 Respond in this exact JSON format (no markdown, no code fences). Omit "critical" if nothing critical was mentioned, and omit any field inside critical that wasn't mentioned:
 {"sections":{"sectionKey":["Label: value"]},"critical":{"allergies":[{"allergen":"Peanuts","severity":"severe"}],"medications":[{"name":"...","dose":"..."}],"emergencyContacts":[{"name":"...","phone":"...","relationship":"..."}],"pediatrician":{"name":"...","phone":"..."},"bloodType":"O+"}}
+
+Raw transcript:
+"""
+${text}
+"""`;
+}
+
+function buildMedicationPrompt(text, childName) {
+  return `You are extracting a single medication record from a parent's spoken description${childName ? ` for ${childName}` : ''}. The parent dictated this, so it may be rambling — pull out only the medication facts.
+
+Extract these fields (all optional except name):
+- name: medication name (e.g. "Tylenol", "Albuterol inhaler", "Amoxicillin")
+- dose: amount + unit (e.g. "5 mL", "2 puffs", "1 tablet", "1/2 teaspoon")
+- route: how it's given ("oral", "inhaled", "topical", "nasal", "rectal", "subcutaneous") — infer from context if obvious (e.g. mL liquid = oral, inhaler = inhaled, cream = topical)
+- scheduledTimes: array of 24-hour times like ["08:00", "14:00", "20:00"] ONLY IF the parent specified concrete clock times. Otherwise return an empty array.
+- cooldownHours: number — minimum hours between doses. Default 4 if not stated. For "every 6 hours" use 6.
+- asNeeded: true if the parent says "as needed", "PRN", "if she has X", "only when...". False if it's a regular daily schedule.
+- notes: anything else the sitter should know (when to give, max per day, warnings, what it's for)
+
+Respond in this exact JSON format (no markdown, no code fences). Omit fields the parent didn't mention except name, cooldownHours (default 4), asNeeded (default false), and scheduledTimes (default empty array):
+{"name":"Tylenol","dose":"5 mL","route":"oral","scheduledTimes":[],"cooldownHours":4,"asNeeded":true,"notes":"For fever over 101. Max 4 doses per day."}
+
+Raw transcript:
+"""
+${text}
+"""`;
+}
+
+function buildCriticalPrompt(text, childName) {
+  return `You are extracting structured critical-info from a parent's spoken description${childName ? ` for ${childName}` : ''}. The parent dictated this, so pull out the safety-critical facts only.
+
+Extract:
+- allergies: array of {"allergen": "Peanuts", "severity": "severe"|"moderate"|"mild" (if stated), "reaction": "hives, swelling" (if stated), "treatment": "EpiPen, call 911" (if stated)}
+- medications: array of {"name": "Albuterol", "dose": "2 puffs", "schedule": "before exercise", "notes": "..."} — only "current" or "daily" meds, not occasional ones
+- emergencyContacts: array of {"name": "Aunt Ariel", "relationship": "Aunt", "phone": "401-225-3961"}
+- pediatrician: {"name": "Dr. Smith", "phone": "..."}
+- insurance: {"provider": "Blue Cross", "policyNumber": "ABC123", "groupNumber": "..."}
+- bloodType: "O+", "A-", etc.
+
+Respond in this exact JSON format (no markdown, no code fences). Omit any field the parent didn't mention. Use empty arrays only if you have at least one item to put in them:
+{"allergies":[{"allergen":"Peanuts","severity":"severe","treatment":"EpiPen"}],"medications":[{"name":"...","dose":"..."}],"emergencyContacts":[{"name":"...","phone":"...","relationship":"..."}],"pediatrician":{"name":"...","phone":"..."},"insurance":{"provider":"...","policyNumber":"..."},"bloodType":"O+"}
 
 Raw transcript:
 """
