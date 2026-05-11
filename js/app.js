@@ -253,19 +253,13 @@ async function routeApp() {
       }
     }, 1500);
     return;
-  } else if (!state.userData.role) {
-    // User logged in but no role set
-    state.currentScreen = 'auth-role-select';
-    renderRoleSelect();
-  } else if (!state.currentFamily) {
-    // User has role but no family
-    if (state.userData.role === 'parent') {
-      state.currentScreen = 'parent-onboarding';
-      renderParentOnboarding();
-    } else {
-      state.currentScreen = 'sitter-onboarding';
-      renderSitterOnboarding();
-    }
+  } else if (!state.userData.role || !state.currentFamily) {
+    // Pre-family states all flow through the unified split-screen onboarding:
+    // - no role: shows role picker on left, "choose a side" placeholder on right
+    // - parent with no family: role picker stays, right shows create-family + invite
+    // - sitter with no family: role picker stays, right shows invites/search/code
+    state.currentScreen = 'onboarding-split';
+    await renderOnboardingSplit();
   } else {
     // User fully set up with family
     if (state.userData.role === 'parent') {
@@ -580,7 +574,381 @@ async function handleChangeRole() {
 }
 
 // ============================================================================
-// ROLE SELECTION
+// ONBOARDING — SPLIT SCREEN
+// ============================================================================
+//
+// One screen, two columns. Left column is the role picker that stays put;
+// the right column reveals the right next step the moment the user picks a role:
+//   - Parent: name your family, then invite sitters by email
+//   - Sitter: accept pending invites, search families, or paste invite code
+// Mobile collapses to a stacked layout while preserving the same content.
+
+async function renderOnboardingSplit() {
+  const root = document.getElementById('app-root');
+  const role = state.userData?.role || null;
+  const hasFamily = !!state.currentFamily;
+  const userName = state.currentUser?.displayName || state.userData?.name || state.currentUser?.email || 'there';
+
+  // Pre-load anything the right-hand panel might need so the render is instant.
+  let sitterInvites = [];
+  let pendingRequests = [];
+  let sentInvites = [];
+  if (role === 'babysitter' && !hasFamily) {
+    const invs = await listMyFamilyInvites();
+    sitterInvites = invs.success ? invs.data : [];
+    const reqs = await listMyJoinRequests();
+    pendingRequests = (reqs.success ? reqs.data : []).filter(r => r.status === 'pending');
+  }
+  if (role === 'parent' && hasFamily) {
+    const sent = await listFamilyInvitesSent(state.currentFamily.id);
+    sentInvites = sent.success ? sent.data : [];
+  }
+
+  root.innerHTML = `
+    <div class="app-layout onboarding-layout">
+      <header class="app-header onboarding-header">
+        <h1 class="header-title">CribNotes</h1>
+        <button class="btn btn-outline btn-small" id="onboarding-signout">Sign out</button>
+      </header>
+
+      <main class="app-content onboarding-content">
+        <div class="onboarding-split">
+
+          <!-- LEFT: role picker. Always visible. Currently-selected role highlighted. -->
+          <aside class="onboarding-left">
+            <span class="eyebrow">Welcome, ${escapeHtml(userName)}</span>
+            <h2 class="onboarding-heading">Who are you on CribNotes?</h2>
+            <p class="onboarding-sub">
+              Pick a role to get started. You can switch later from Settings.
+            </p>
+
+            <div class="role-stack">
+              <button class="role-tile ${role === 'parent' ? 'is-active' : ''}" data-role="parent">
+                <span class="role-icon">👨‍👩‍👧‍👦</span>
+                <div class="role-body">
+                  <strong>I'm a parent</strong>
+                  <small>Create a family, write the care guide, invite sitters</small>
+                </div>
+                <span class="role-arrow">→</span>
+              </button>
+
+              <button class="role-tile ${role === 'babysitter' ? 'is-active' : ''}" data-role="babysitter">
+                <span class="role-icon">🧑‍💼</span>
+                <div class="role-body">
+                  <strong>I'm a babysitter</strong>
+                  <small>Join a family, view the guide, log your shift</small>
+                </div>
+                <span class="role-arrow">→</span>
+              </button>
+            </div>
+          </aside>
+
+          <!-- RIGHT: dynamic next step. Updates based on the selected role. -->
+          <section class="onboarding-right" id="onboarding-right">
+            ${renderOnboardingRight({ role, hasFamily, sitterInvites, pendingRequests, sentInvites })}
+          </section>
+
+        </div>
+      </main>
+    </div>
+  `;
+
+  attachOnboardingHandlers();
+}
+
+function renderOnboardingRight({ role, hasFamily, sitterInvites, pendingRequests, sentInvites }) {
+  if (!role) {
+    return `
+      <div class="onboarding-placeholder">
+        <span class="eyebrow">Next</span>
+        <h2 class="onboarding-heading">Choose a side</h2>
+        <p>
+          Pick <strong>parent</strong> if you're building the care guide and inviting sitters,
+          or <strong>babysitter</strong> if you're joining an existing family.
+        </p>
+        <div class="placeholder-illustration">🧭</div>
+      </div>
+    `;
+  }
+
+  if (role === 'parent' && !hasFamily) {
+    return `
+      <div class="onboarding-step">
+        <span class="eyebrow">Step 1 of 2</span>
+        <h2 class="onboarding-heading">Name your family</h2>
+        <p>This is the umbrella every child and sitter sits under. You can rename it any time.</p>
+        <form id="parent-family-form" class="onboarding-form">
+          <div class="form-group">
+            <label for="family-name-input">Family name</label>
+            <input type="text" id="family-name-input" placeholder="The Bell Family" required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">Create family</button>
+        </form>
+      </div>
+    `;
+  }
+
+  if (role === 'parent' && hasFamily) {
+    const family = state.currentFamily;
+    return `
+      <div class="onboarding-step">
+        <span class="eyebrow">Step 2 of 2</span>
+        <h2 class="onboarding-heading">Invite your sitter</h2>
+        <p>Send an email invite or share your family code. Sitters can also find you by your email.</p>
+
+        <div class="invite-code-card">
+          <span class="ic-label">Family code</span>
+          <strong class="ic-code">${escapeHtml(family.inviteCode || '------')}</strong>
+          <button class="btn btn-small btn-outline" id="copy-code-onboarding">Copy</button>
+        </div>
+
+        <form id="parent-invite-form" class="onboarding-form">
+          <div class="form-group">
+            <label for="invite-sitter-email">Sitter email</label>
+            <input type="email" id="invite-sitter-email" placeholder="sitter@example.com">
+          </div>
+          <div class="form-group">
+            <label for="invite-sitter-message">Message (optional)</label>
+            <input type="text" id="invite-sitter-message" placeholder="Welcome to the family!">
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">Send invite</button>
+        </form>
+
+        ${sentInvites.length ? `
+          <div class="divider"></div>
+          <h3 style="font-family: var(--font-display); font-size: 1rem; margin-bottom: 8px;">Pending invitations</h3>
+          ${sentInvites.map(i => `
+            <div class="jr-row">
+              <div class="jr-info">
+                <strong>${escapeHtml(i.toSitterEmail)}</strong>
+                <small>${i.createdAt?.toDate ? 'sent ' + i.createdAt.toDate().toLocaleDateString() : 'sent recently'}</small>
+              </div>
+              <div class="jr-actions">
+                <button class="btn btn-small btn-outline cancel-invite-ob" data-invite-id="${i.id}" style="color: var(--color-rust); border-color: var(--color-rust);">Cancel</button>
+              </div>
+            </div>
+          `).join('')}
+        ` : ''}
+
+        <div class="divider"></div>
+        <button class="btn btn-primary btn-full" id="continue-to-dashboard">Continue to dashboard →</button>
+      </div>
+    `;
+  }
+
+  if (role === 'babysitter' && !hasFamily) {
+    return `
+      <div class="onboarding-step">
+        ${sitterInvites.length ? `
+          <span class="eyebrow" style="color: var(--color-teal);">You're invited</span>
+          <h2 class="onboarding-heading">Accept an invitation</h2>
+          <div class="invite-list">
+            ${sitterInvites.map(i => `
+              <div class="invite-card">
+                <div class="invite-card-text">
+                  <strong>${escapeHtml(i.familyName || 'Family')}</strong>
+                  <small>Invited by ${escapeHtml(i.fromParentName || 'a parent')}</small>
+                  ${i.message ? `<p class="jr-msg">"${escapeHtml(i.message)}"</p>` : ''}
+                </div>
+                <div class="invite-card-actions">
+                  <button class="btn btn-small btn-primary invite-accept-ob" data-invite-id="${i.id}">Accept</button>
+                  <button class="btn btn-small btn-outline invite-decline-ob" data-invite-id="${i.id}">Decline</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="divider"></div>
+        ` : `
+          <span class="eyebrow">Step 1</span>
+          <h2 class="onboarding-heading">Find a family to join</h2>
+        `}
+
+        ${pendingRequests.length ? `
+          <div class="handoff-note" style="margin-bottom: 1rem;">
+            <strong>Pending request</strong><br>
+            You've requested to join ${pendingRequests.length} ${pendingRequests.length === 1 ? 'family' : 'families'}. Waiting on the parent.
+          </div>
+        ` : ''}
+
+        <p>Search by the parent's email, or paste an invite code if you have one.</p>
+
+        <div class="form-group">
+          <label for="ob-family-search">Search by parent email</label>
+          <input type="text" id="ob-family-search" placeholder="parent@example.com">
+        </div>
+        <button class="btn btn-outline btn-full" id="ob-search-btn">Search families</button>
+
+        <div id="ob-search-results" style="margin-top: 12px;"></div>
+
+        <div class="divider"></div>
+
+        <form id="ob-invite-code-form" class="onboarding-form">
+          <div class="form-group">
+            <label for="ob-invite-code">Or enter an invite code</label>
+            <input type="text" id="ob-invite-code" placeholder="ABC123" maxlength="6"
+              style="text-transform: uppercase; letter-spacing: 0.15em; text-align: center; font-size: 1.1em;">
+          </div>
+          <button type="submit" class="btn btn-primary btn-full">Join with code</button>
+        </form>
+      </div>
+    `;
+  }
+
+  if (role === 'babysitter' && hasFamily) {
+    return `
+      <div class="onboarding-step">
+        <span class="eyebrow">All set</span>
+        <h2 class="onboarding-heading">You're in ${escapeHtml(state.currentFamily.name || 'the family')}</h2>
+        <p>Continue to start your first shift.</p>
+        <button class="btn btn-primary btn-full" id="continue-to-dashboard">Continue →</button>
+      </div>
+    `;
+  }
+
+  return '';
+}
+
+function attachOnboardingHandlers() {
+  // Sign out
+  document.getElementById('onboarding-signout')?.addEventListener('click', async () => {
+    await signOut();
+  });
+
+  // Role tiles — pick a role
+  document.querySelectorAll('.role-tile').forEach(tile => {
+    tile.addEventListener('click', async () => {
+      const newRole = tile.dataset.role;
+      if (state.userData?.role === newRole) return; // already selected
+      showLoading();
+      const r = await setUserRole(newRole);
+      hideLoading();
+      if (!r.success) { showToast(r.error || 'Could not set role', 'error'); return; }
+      state.userData.role = newRole;
+      renderOnboardingSplit();
+    });
+  });
+
+  // Continue to dashboard
+  document.getElementById('continue-to-dashboard')?.addEventListener('click', async () => {
+    await routeApp();
+  });
+
+  // PARENT: create family form
+  document.getElementById('parent-family-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('family-name-input').value.trim();
+    if (!name) { showToast('Enter a family name', 'error'); return; }
+    showLoading();
+    const r = await createFamily(name);
+    hideLoading();
+    if (!r.success) { showToast(r.error || 'Could not create family', 'error'); return; }
+    state.currentFamily = { id: r.familyId, name, inviteCode: r.inviteCode, parentIds: [state.currentUser.uid], sitterIds: [] };
+    showToast('Family created!', 'success');
+    renderOnboardingSplit();
+  });
+
+  // PARENT: invite sitter
+  document.getElementById('parent-invite-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('invite-sitter-email').value.trim();
+    const message = document.getElementById('invite-sitter-message').value.trim();
+    if (!email || !email.includes('@')) { showToast('Enter a valid email', 'error'); return; }
+    showLoading();
+    const search = await searchSittersByEmail(email);
+    const found = search.success ? search.data.find(s => (s.email || '').toLowerCase() === email.toLowerCase()) : null;
+    const r = await inviteSitterByEmail(state.currentFamily.id, email, found?.id || null, message);
+    hideLoading();
+    if (!r.success) { showToast(r.error || 'Could not send invite', 'error'); return; }
+    showToast(r.alreadyPending ? 'Already invited' : 'Invitation sent', 'success');
+    renderOnboardingSplit();
+  });
+
+  // PARENT: cancel a pending invite
+  document.querySelectorAll('.cancel-invite-ob').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await cancelFamilyInvite(btn.dataset.inviteId);
+      hideLoading();
+      if (r.success) renderOnboardingSplit();
+      else showToast(r.error || 'Could not cancel', 'error');
+    }));
+
+  // PARENT: copy family code
+  document.getElementById('copy-code-onboarding')?.addEventListener('click', () => {
+    const code = state.currentFamily?.inviteCode;
+    if (!code) return;
+    navigator.clipboard.writeText(code).then(() => showToast('Code copied', 'success'));
+  });
+
+  // SITTER: accept/decline invite
+  document.querySelectorAll('.invite-accept-ob').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await acceptFamilyInvite(btn.dataset.inviteId);
+      hideLoading();
+      if (r.success) {
+        showToast('Joined family!', 'success');
+        state.currentFamily = { id: r.familyId };
+        await routeApp();
+      } else showToast(r.error || 'Could not accept', 'error');
+    }));
+  document.querySelectorAll('.invite-decline-ob').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      await declineFamilyInvite(btn.dataset.inviteId);
+      hideLoading();
+      renderOnboardingSplit();
+    }));
+
+  // SITTER: search families by parent email
+  document.getElementById('ob-search-btn')?.addEventListener('click', async () => {
+    const q = document.getElementById('ob-family-search').value.trim();
+    if (q.length < 3) { showToast('Type at least 3 characters', 'error'); return; }
+    const box = document.getElementById('ob-search-results');
+    box.innerHTML = '<p class="text-muted">Searching...</p>';
+    const r = await searchFamiliesByParentEmail(q);
+    if (!r.success || r.data.length === 0) {
+      box.innerHTML = '<p class="text-muted">No families found. Try a different email or use an invite code.</p>';
+      return;
+    }
+    box.innerHTML = r.data.map(f => `
+      <div class="search-result-card">
+        <div>
+          <strong>${escapeHtml(f.name)}</strong>
+          <small>${f.parentNames.map(p => escapeHtml(p.name || p.email)).join(', ')}</small>
+        </div>
+        <button class="btn btn-small btn-primary ob-request-join" data-family-id="${f.id}">Request to join</button>
+      </div>
+    `).join('');
+    document.querySelectorAll('.ob-request-join').forEach(btn =>
+      btn.addEventListener('click', async () => {
+        showLoading();
+        const req = await requestToJoinFamily(btn.dataset.familyId);
+        hideLoading();
+        if (req.success) {
+          showToast(req.alreadyPending ? 'Request already pending' : 'Request sent', 'success');
+          renderOnboardingSplit();
+        } else showToast(req.error || 'Could not request', 'error');
+      }));
+  });
+
+  // SITTER: join via invite code
+  document.getElementById('ob-invite-code-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = document.getElementById('ob-invite-code').value.toUpperCase().trim();
+    if (!code) { showToast('Enter an invite code', 'error'); return; }
+    showLoading();
+    const r = await joinFamilyWithCode(code);
+    hideLoading();
+    if (!r.success) { showToast(r.error || 'Invalid code', 'error'); return; }
+    showToast('Joined family!', 'success');
+    state.currentFamily = { id: r.familyId };
+    await routeApp();
+  });
+}
+
+// ============================================================================
+// ROLE SELECTION (legacy single-purpose screen, kept for re-pick from settings)
 // ============================================================================
 
 function renderRoleSelect() {

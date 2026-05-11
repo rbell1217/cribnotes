@@ -1577,6 +1577,232 @@ textarea { min-height: 100px; resize: vertical; }
 .interim-text { font-style: italic; color: var(--color-text-light); margin-top: 8px; }
 
 /* ============================================================================
+   SPLIT-SCREEN ONBOARDING
+   ============================================================================ */
+
+.onboarding-layout { background: var(--color-paper); }
+.onboarding-header { border-bottom: 1px solid var(--color-border); }
+.onboarding-content { overflow-y: auto; padding-bottom: 32px; }
+
+.onboarding-split {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-lg);
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--spacing-lg) var(--spacing-md);
+}
+
+.onboarding-left,
+.onboarding-right {
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  padding: var(--spacing-xl);
+}
+
+.onboarding-left .eyebrow {
+  font-family: var(--font-display);
+  font-style: italic;
+  color: var(--color-text-light);
+  font-size: 1rem;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.onboarding-heading {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.6rem, 4vw, 2.4rem);
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+  margin-bottom: 12px;
+  color: var(--color-ink);
+}
+
+.onboarding-sub {
+  color: var(--color-text-light);
+  margin-bottom: var(--spacing-lg);
+  line-height: 1.5;
+}
+
+.role-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.role-tile {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px;
+  background: white;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  text-align: left;
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: var(--font-body);
+  color: var(--color-ink);
+}
+.role-tile:hover {
+  border-color: var(--color-ink);
+  transform: translateY(-2px);
+}
+.role-tile.is-active {
+  background: var(--color-ink);
+  color: white;
+  border-color: var(--color-ink);
+}
+.role-tile.is-active .role-body small { color: rgba(255, 255, 255, 0.75); }
+.role-tile .role-icon { font-size: 1.8rem; line-height: 1; flex-shrink: 0; }
+.role-tile .role-body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.role-tile .role-body strong {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: -0.01em;
+}
+.role-tile .role-body small {
+  color: var(--color-text-light);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+.role-tile .role-arrow {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  opacity: 0.4;
+  transition: var(--transition);
+}
+.role-tile:hover .role-arrow,
+.role-tile.is-active .role-arrow { opacity: 1; transform: translateX(2px); }
+
+.onboarding-right .eyebrow {
+  font-family: var(--font-display);
+  font-style: italic;
+  color: var(--color-text-light);
+  font-size: 1rem;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.onboarding-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.onboarding-placeholder p {
+  color: var(--color-text-light);
+  line-height: 1.55;
+  margin-bottom: var(--spacing-lg);
+}
+.placeholder-illustration {
+  font-size: 4rem;
+  margin-top: var(--spacing-lg);
+  opacity: 0.5;
+  align-self: center;
+}
+
+.onboarding-step p {
+  color: var(--color-text-light);
+  margin-bottom: var(--spacing-md);
+  line-height: 1.55;
+}
+
+.onboarding-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+.invite-code-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--color-bone);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  margin-bottom: var(--spacing-md);
+}
+.ic-label {
+  font-family: var(--font-display);
+  font-style: italic;
+  color: var(--color-text-light);
+  font-size: 0.9rem;
+}
+.ic-code {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.4rem;
+  letter-spacing: 0.15em;
+  flex: 1;
+}
+
+.invite-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: var(--spacing-md);
+}
+.invite-card {
+  background: var(--color-bone);
+  border: 1.5px solid var(--color-teal);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.invite-card-text strong {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  display: block;
+}
+.invite-card-text small {
+  color: var(--color-text-light);
+  font-size: 0.85rem;
+}
+.invite-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.search-result-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 8px;
+}
+.search-result-card strong {
+  font-family: var(--font-display);
+  display: block;
+  font-size: 1.05rem;
+}
+.search-result-card small {
+  color: var(--color-text-light);
+  font-size: 0.85rem;
+}
+
+@media (min-width: 900px) {
+  .onboarding-split {
+    grid-template-columns: minmax(360px, 5fr) 7fr;
+    align-items: start;
+    padding: var(--spacing-xl);
+  }
+  .onboarding-left {
+    position: sticky;
+    top: var(--spacing-md);
+  }
+}
+
+/* ============================================================================
    JOIN REQUESTS BANNER (parent dashboard) + SEARCH RESULTS
    ============================================================================ */
 
