@@ -7,6 +7,43 @@
     <meta name="theme-color" content="#1A1A1A">
     <title>CribNotes</title>
 
+    <!-- One-time cache-bust: when CRIBNOTES_VERSION advances, force every
+         device to drop its old service worker + caches and reload once.
+         This guarantees users pick up fixes like the dictation pipeline
+         without having to manually clear site data. -->
+    <script>
+      (function bustStaleCache() {
+        var LATEST = 'v7-ai-organize-2026-05-11';
+        try {
+          var stored = localStorage.getItem('cribnotes-version');
+          if (stored === LATEST) return;
+          if (sessionStorage.getItem('cribnotes-bust-in-progress') === LATEST) {
+            // Already busted this session, just record version and continue
+            localStorage.setItem('cribnotes-version', LATEST);
+            return;
+          }
+          sessionStorage.setItem('cribnotes-bust-in-progress', LATEST);
+          var tasks = [];
+          if ('serviceWorker' in navigator) {
+            tasks.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+              return Promise.all(regs.map(function (r) { return r.unregister(); }));
+            }).catch(function () {}));
+          }
+          if ('caches' in window) {
+            tasks.push(caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            }).catch(function () {}));
+          }
+          Promise.all(tasks).then(function () {
+            localStorage.setItem('cribnotes-version', LATEST);
+            location.reload();
+          });
+        } catch (e) {
+          // localStorage might be disabled (private mode); fail silently.
+        }
+      })();
+    </script>
+
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icon-192.png">
 
