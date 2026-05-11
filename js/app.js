@@ -24,7 +24,10 @@ import {
   enableOfflinePersistence,
   searchFamiliesByParentEmail, requestToJoinFamily,
   listMyJoinRequests, listFamilyJoinRequests,
-  approveJoinRequest, declineJoinRequest
+  approveJoinRequest, declineJoinRequest,
+  searchSittersByEmail, inviteSitterByEmail,
+  listMyFamilyInvites, listFamilyInvitesSent,
+  acceptFamilyInvite, declineFamilyInvite, cancelFamilyInvite
 } from './database.js';
 
 import {
@@ -375,8 +378,16 @@ function renderAuthLogin() {
   // Event listeners
   document.getElementById('login-form').addEventListener('submit', handleLogin);
   document.getElementById('google-login-btn').addEventListener('click', handleGoogleLogin);
-  document.getElementById('go-to-signup').addEventListener('click', (e) => {
+  document.getElementById('go-to-signup').addEventListener('click', async (e) => {
     e.preventDefault();
+    // Force sign-out of any cached Firebase session so a fresh sign-up
+    // starts cleanly. Firebase persists auth state in localStorage, which
+    // can mask a logged-in user behind the login screen.
+    try { await signOut(); } catch (err) { /* ignore */ }
+    state.currentUser = null;
+    state.userData = null;
+    state.currentFamily = null;
+    state.activeShift = null;
     renderAuthSignup();
   });
   document.getElementById('go-to-reset').addEventListener('click', (e) => {
@@ -643,17 +654,43 @@ function renderParentOnboarding() {
 async function renderSitterOnboarding() {
   const root = document.getElementById('app-root');
 
-  // Check whether the sitter has any pending join requests so we can show them
+  // Pending join requests THIS user initiated
   const myReqs = await listMyJoinRequests();
   const pending = (myReqs.success ? myReqs.data : []).filter(r => r.status === 'pending');
+
+  // Pending family invites SENT TO this user (parent-initiated)
+  const invitesResult = await listMyFamilyInvites();
+  const invites = invitesResult.success ? invitesResult.data : [];
 
   root.innerHTML = `
     <div class="container container-small">
       <div class="card">
         <h1 style="font-family: var(--font-display); font-size: 2.25rem; letter-spacing: -0.025em;">Join a family</h1>
         <p style="color: var(--color-text-light); margin-bottom: 1.5rem;">
-          Find a family by the parent's email, or paste an invite code if you already have one.
+          Accept a family invite, search by parent email, or paste an invite code.
         </p>
+
+        ${invites.length ? `
+          <div class="join-requests-banner" style="border-color: var(--color-teal); margin-bottom: 1rem;">
+            <div class="jr-header">
+              <span class="eyebrow" style="color: var(--color-teal);">You're invited</span>
+              <h3>${invites.length} pending invitation${invites.length === 1 ? '' : 's'}</h3>
+            </div>
+            ${invites.map(i => `
+              <div class="jr-row" data-invite-id="${i.id}">
+                <div class="jr-info">
+                  <strong>${escapeHtml(i.familyName || 'Family')}</strong>
+                  <small>Invited by ${escapeHtml(i.fromParentName || 'a parent')}</small>
+                  ${i.message ? `<p class="jr-msg">"${escapeHtml(i.message)}"</p>` : ''}
+                </div>
+                <div class="jr-actions">
+                  <button class="btn btn-small btn-primary invite-accept" data-invite-id="${i.id}">Accept</button>
+                  <button class="btn btn-small btn-outline invite-decline" data-invite-id="${i.id}">Decline</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
 
         ${pending.length ? `
           <div class="handoff-note" style="margin-bottom: 1rem;">
@@ -753,6 +790,29 @@ async function renderSitterOnboarding() {
         }
       }));
   });
+
+  // Accept / decline family invitations sent BY a parent
+  document.querySelectorAll('.invite-accept').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await acceptFamilyInvite(btn.dataset.inviteId);
+      hideLoading();
+      if (r.success) {
+        showToast('Joined family!', 'success');
+        state.currentFamily = { id: r.familyId };
+        await routeApp();
+      } else {
+        showToast(r.error || 'Could not accept', 'error');
+      }
+    }));
+  document.querySelectorAll('.invite-decline').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await declineFamilyInvite(btn.dataset.inviteId);
+      hideLoading();
+      if (r.success) { showToast('Invitation declined', 'info'); renderSitterOnboarding(); }
+      else showToast(r.error || 'Could not decline', 'error');
+    }));
 
   document.getElementById('change-role-btn').addEventListener('click', handleChangeRole);
 
@@ -2419,11 +2479,107 @@ function renderParentSettings() {
     </div>
     <hr style="margin: 16px 0;">
     <button class="btn btn-outline btn-full" onclick="copyInviteCode()">Copy Code</button>
+    <button class="btn btn-full" onclick="renderInviteSitterScreen()">Invite a Sitter</button>
     <button class="btn btn-full" onclick="renderProfileSettings()">Profile</button>
     <button class="btn btn-full" onclick="renderSitterPermissionsScreen()">Sitter Permissions</button>
     <button class="btn btn-full" onclick="renderShiftHistoryScreen()">Shift History</button>
     <button class="btn btn-outline btn-full" onclick="handleLogout()">Sign Out</button>
   `);
+}
+
+async function renderInviteSitterScreen() {
+  closeModal();
+  showLoading();
+  const family = state.currentFamily;
+  const sent = await listFamilyInvitesSent(family.id);
+  hideLoading();
+  const pending = sent.success ? sent.data : [];
+
+  const root = document.getElementById('app-root');
+  root.innerHTML = `
+    <div class="app-layout">
+      <header class="app-header">
+        <button class="btn-icon" id="back-btn">←</button>
+        <h1 class="header-title">Invite a Sitter</h1>
+      </header>
+      <main class="app-content">
+        <div class="container container-small">
+          <div class="card">
+            <h2 style="font-family: var(--font-display); font-size: 1.5rem; letter-spacing: -0.02em; margin-bottom: 8px;">
+              Send a sitter an invitation
+            </h2>
+            <p style="color: var(--color-text-light); margin-bottom: 1rem; font-size: 0.92rem;">
+              Search a babysitter on CribNotes by email. If they accept, they'll join ${escapeHtml(family.name)} automatically.
+              They can also join if you share your invite code <strong>${escapeHtml(family.inviteCode || '')}</strong>.
+            </p>
+
+            <div class="form-group">
+              <label for="invite-email">Sitter email</label>
+              <input type="email" id="invite-email" placeholder="sitter@example.com">
+            </div>
+            <div class="form-group">
+              <label for="invite-message">Message (optional)</label>
+              <input type="text" id="invite-message" placeholder="Join the Bell family!">
+            </div>
+            <button class="btn btn-primary btn-full" id="send-invite-btn">Send invite</button>
+
+            <div id="invite-search-results" style="margin-top: 1rem;"></div>
+
+            ${pending.length ? `
+              <div class="divider"></div>
+              <h3 style="font-family: var(--font-display); margin-bottom: 8px;">Pending invitations</h3>
+              ${pending.map(i => `
+                <div class="jr-row" data-invite-id="${i.id}">
+                  <div class="jr-info">
+                    <strong>${escapeHtml(i.toSitterEmail)}</strong>
+                    <small>Sent ${i.createdAt?.toDate ? i.createdAt.toDate().toLocaleDateString() : 'recently'}</small>
+                  </div>
+                  <div class="jr-actions">
+                    <button class="btn btn-small btn-outline cancel-invite" data-invite-id="${i.id}" style="color: var(--color-rust); border-color: var(--color-rust);">Cancel</button>
+                  </div>
+                </div>
+              `).join('')}
+            ` : ''}
+          </div>
+        </div>
+      </main>
+    </div>
+  `;
+
+  document.getElementById('back-btn').addEventListener('click', renderParentDashboard);
+
+  document.getElementById('send-invite-btn').addEventListener('click', async () => {
+    const email = document.getElementById('invite-email').value.trim();
+    const message = document.getElementById('invite-message').value.trim();
+    if (!email || !email.includes('@')) {
+      showToast('Enter a valid email', 'error');
+      return;
+    }
+    showLoading();
+    // Look up the user (best-effort) so we can store toSitterId too
+    const searchResult = await searchSittersByEmail(email);
+    const found = searchResult.success
+      ? searchResult.data.find(s => (s.email || '').toLowerCase() === email.toLowerCase())
+      : null;
+    const r = await inviteSitterByEmail(family.id, email, found?.id || null, message);
+    hideLoading();
+    if (r.success) {
+      if (r.alreadyPending) showToast('That sitter already has a pending invite', 'info');
+      else showToast('Invitation sent', 'success');
+      renderInviteSitterScreen();
+    } else {
+      showToast(r.error || 'Could not send invite', 'error');
+    }
+  });
+
+  document.querySelectorAll('.cancel-invite').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      showLoading();
+      const r = await cancelFamilyInvite(btn.dataset.inviteId);
+      hideLoading();
+      if (r.success) { showToast('Invite cancelled', 'info'); renderInviteSitterScreen(); }
+      else showToast(r.error || 'Could not cancel', 'error');
+    }));
 }
 
 async function renderSitterPermissionsScreen() {
@@ -2829,7 +2985,7 @@ function renderShiftStartScreen() {
     <div class="app-layout">
       <header class="app-header">
         <h1 class="header-title">Start Shift</h1>
-        <button class="btn-icon" id="logout-btn" title="Sign out">⎋</button>
+        <button class="btn btn-outline btn-small" id="logout-btn">Sign out</button>
       </header>
       <main class="app-content">
         <div class="container container-small">
@@ -3857,6 +4013,7 @@ window.renderMedicationsScreen = renderMedicationsScreen;
 window.renderEditCriticalInfoForm = renderEditCriticalInfoForm;
 window.renderSitterPermissionsScreen = renderSitterPermissionsScreen;
 window.renderShiftHistoryScreen = renderShiftHistoryScreen;
+window.renderInviteSitterScreen = renderInviteSitterScreen;
 window.enablePushFromSettings = enablePushFromSettings;
 window.recordDoseFromUI = recordDoseFromUI;
 window.removeMedicationConfirm = removeMedicationConfirm;

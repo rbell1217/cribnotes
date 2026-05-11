@@ -740,6 +740,136 @@ export async function declineJoinRequest(requestId) {
 }
 
 /**
+ * Family Invites (parent → sitter direction)
+ * ---------------------------------------------
+ * The parent searches for a sitter by email and sends them an invite.
+ * The sitter sees pending invites on the onboarding screen and can accept.
+ *
+ * Stored at /familyInvites/{inviteId}.
+ */
+
+export async function searchSittersByEmail(emailSubstring) {
+  try {
+    const snap = await db().collection('users')
+      .where('role', '==', 'babysitter').limit(50).get();
+    const matches = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(u => (u.email || '').toLowerCase().includes(emailSubstring.toLowerCase()));
+    return { success: true, data: matches };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function inviteSitterByEmail(familyId, sitterEmail, sitterId = null, message = '') {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    const familyDoc = await db().collection('families').doc(familyId).get();
+    const familyData = familyDoc.exists ? familyDoc.data() : {};
+
+    // De-dupe pending invites for the same family + email
+    const existing = await db().collection('familyInvites')
+      .where('familyId', '==', familyId)
+      .where('toSitterEmail', '==', sitterEmail.toLowerCase())
+      .where('status', '==', 'pending')
+      .limit(1).get();
+    if (!existing.empty) {
+      return { success: true, alreadyPending: true, inviteId: existing.docs[0].id };
+    }
+
+    const ref = await db().collection('familyInvites').add({
+      familyId,
+      familyName: familyData.name || 'Family',
+      fromParentId: user.uid,
+      fromParentName: user.displayName || user.email,
+      toSitterEmail: sitterEmail.toLowerCase(),
+      toSitterId: sitterId || null,
+      status: 'pending',
+      message,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true, inviteId: ref.id };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function listMyFamilyInvites() {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    // Match by email so invites work even before the user has a Firestore doc
+    const snap = await db().collection('familyInvites')
+      .where('toSitterEmail', '==', (user.email || '').toLowerCase())
+      .where('status', '==', 'pending').get();
+    return { success: true, data: snap.docs.map(d => ({ id: d.id, ...d.data() })) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function listFamilyInvitesSent(familyId) {
+  try {
+    const snap = await db().collection('familyInvites')
+      .where('familyId', '==', familyId)
+      .where('status', '==', 'pending').get();
+    return { success: true, data: snap.docs.map(d => ({ id: d.id, ...d.data() })) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function acceptFamilyInvite(inviteId) {
+  try {
+    const user = getCurrentUser();
+    if (!user) throw new Error('Not signed in');
+    const inv = await db().collection('familyInvites').doc(inviteId).get();
+    if (!inv.exists) throw new Error('Invite not found');
+    const invData = inv.data();
+    if ((invData.toSitterEmail || '').toLowerCase() !== (user.email || '').toLowerCase()) {
+      throw new Error('This invite is for a different email');
+    }
+    await db().collection('families').doc(invData.familyId).update({
+      sitterIds: firebase.firestore.FieldValue.arrayUnion(user.uid)
+    });
+    await db().collection('users').doc(user.uid).update({
+      familyId: invData.familyId,
+      role: 'babysitter'
+    });
+    await db().collection('familyInvites').doc(inviteId).update({
+      status: 'accepted',
+      toSitterId: user.uid,
+      resolvedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true, familyId: invData.familyId };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function declineFamilyInvite(inviteId) {
+  try {
+    await db().collection('familyInvites').doc(inviteId).update({
+      status: 'declined',
+      resolvedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function cancelFamilyInvite(inviteId) {
+  try {
+    await db().collection('familyInvites').doc(inviteId).delete();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Search across care guide
  */
 export async function searchGuide(familyId, childId, searchTerm) {
